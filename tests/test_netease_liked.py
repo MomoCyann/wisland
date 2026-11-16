@@ -25,19 +25,27 @@ class NeteaseLikedStateTests(unittest.TestCase):
         self.assertEqual(self.log.track["id"], "2")
         self.assertFalse(self.log.liked)
 
-    def test_stale_tray_icon_event_is_ignored_after_track_change(self):
+    def test_tray_icon_immediately_after_track_change_sets_state(self):
         self.log._line(_play_line("2"))
         self.log._line('[100:200:1116/120001:123457:INFO:x(1)] {"id":"trayLike","icon":"/liked.svg"}')
-        self.assertFalse(self.log.liked)
-        self.assertNotIn("2", self.log._liked_by_id)
-
-    def test_song_specific_heart_event_updates_only_matching_track(self):
-        self.log._line(_play_line("2"))
-        self.log._line('[100:200:1116/120001:123457:INFO:x(1)] {"id":"1","is_heart":1}')
-        self.assertFalse(self.log.liked)
-        self.log._line('[100:200:1116/120002:123458:INFO:x(1)] {"id":"2","is_heart":1}')
         self.assertTrue(self.log.liked)
-        self.log._line('[100:200:1116/120003:123459:INFO:x(1)] {"id":"2","is_heart":0}')
+        self.assertTrue(self.log._liked_by_id["2"])
+
+    def test_late_tray_icon_event_is_ignored(self):
+        self.log._line(_play_line("2"))
+        self.log._line('[100:200:1116/120004:126000:INFO:x(1)] {"id":"trayLike","icon":"/liked.svg"}')
+        self.assertFalse(self.log.liked)
+
+    def test_is_heart_telemetry_is_not_treated_as_like_state(self):
+        self.log._line(_play_line("2"))
+        self.log._line('[100:200:1116/120001:123457:INFO:x(1)] {"id":"2","is_heart":1}')
+        self.assertFalse(self.log.liked)
+
+    def test_add_and_delete_track_events_update_matching_song(self):
+        self.log._line(_play_line("2"))
+        self.log._line('[100:200:1116/120001:123457:INFO:x(1)] {"op":"add_track","ids":[2]}')
+        self.assertTrue(self.log.liked)
+        self.log._line('[100:200:1116/120002:123458:INFO:x(1)] {"op":"del_track","ids":[2]}')
         self.assertFalse(self.log.liked)
 
     def test_wisland_like_action_updates_parser_cache(self):

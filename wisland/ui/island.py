@@ -694,10 +694,10 @@ class Island(QtWidgets.QWidget):
             self.timer.stop()
             self.timer.setInterval(16)
         elif self.mode == "anchored" and self.sw.rest and self.sh.rest and not self.expanded:
-            # 静止收起态：音乐、歌词、字幕和贴纸统一约 45fps；普通时钟恢复约 30fps。
-            # 展开、拖动、切换等动画仍由上面的 16ms 分支保持约 60fps。
+            # 静止收起态：贴纸约 60fps；音乐、歌词、字幕约 45fps；普通时钟约 30fps。
+            # 展开、拖动、切换等动画也由上面的 16ms 分支保持约 60fps。
             cm = self.compact.mode()
-            self.timer.setInterval(22 if cm in ("media", "subtitle", "activity", "pet") else 33)
+            self.timer.setInterval(16 if cm == "pet" else (22 if cm in ("media", "subtitle", "activity") else 33))
         else:
             self.timer.setInterval(16)
 

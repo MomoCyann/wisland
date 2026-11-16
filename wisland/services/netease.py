@@ -38,7 +38,6 @@ _HEADER = re.compile(r"^\[(\d+):(\d+):(\d{4}/\d{6}):(\d+):([A-Z]+):")
 _SEEK = re.compile(r'"setPlayingPosition"\s*,\s*(-?\d+(?:\.\d+)?)')
 _STATE = re.compile(r'"native[^"]*state"\s*,\s*(\d+)')
 _EXIT = re.compile(r"Process\s+(\d+)\s+exited")
-_HEART = re.compile(r'"id"\s*:\s*"?(\d+)"?.{0,1800}?"is_heart"\s*:\s*([01])')
 _LIKE_CHANGE = re.compile(r'"op"\s*:\s*"(add_track|del_track)".{0,600}?"ids"\s*:\s*\[\s*(\d+)')
 
 _k32 = ctypes.WinDLL("kernel32")
@@ -93,6 +92,9 @@ class NeteaseLog:
         self.playing = False
         self.liked: bool | None = None
         self._liked_by_id: dict[str, bool] = {}
+        self._tray_song_id = ""       # 切歌后短时间内，trayLike 图标对应的新歌曲
+        self._tray_from_tick = 0
+        self._tray_until_tick = 0
         self.pos = 0.0              # 暂停时的位置；播放时为 anchor 时刻的位置
         self.anchor = 0.0           # 播放中：位置 = pos + (now - anchor)
         self.anchored = False
@@ -141,17 +143,13 @@ class NeteaseLog:
         return self.pos + max(0.0, at - self.anchor) if self.playing else self.pos
 
     def _update_liked(self, line: str):
-        """只用带歌曲 id 的埋点 / 歌单事件恢复红心状态。
+        """恢复红心状态。
 
-        trayLike 图标刷新事件没有歌曲 id，而且切歌后经常延迟到达；若把它直接套到
-        当前歌曲，就会把上一首的实心红心错误继承给下一首，因此这里刻意忽略它。
+        日志字段 ``is_heart`` 表示心动模式来源，不是歌曲是否已收藏；它在空心歌曲上
+        也会持续写 1，不能用于红心 UI。真正可靠的是切歌后紧跟的 trayLike 图标，
+        以及用户操作产生、带歌曲 id 的 add_track / del_track 事件。
         """
         plain = line.replace('\\"', '"')
-        for m in _HEART.finditer(plain):
-            sid, liked = m.group(1), m.group(2) == "1"
-            self._liked_by_id[sid] = liked
-            if self.track and self.track.get("id") == sid:
-                self.liked = liked
         change = _LIKE_CHANGE.search(plain)
         if change:
             liked = change.group(1) == "add_track"
@@ -159,6 +157,20 @@ class NeteaseLog:
             self._liked_by_id[sid] = liked
             if self.track and self.track.get("id") == sid:
                 self.liked = liked
+
+        if '"id":"trayLike"' not in plain:
+            return
+        liked = "/liked.svg" in plain
+        if not liked and "/like.svg" not in plain:
+            return
+        header = _HEADER.match(line)
+        if not header or not self.track:
+            return
+        tick = int(header.group(4))
+        sid = str(self.track.get("id") or "")
+        if sid == self._tray_song_id and self._tray_from_tick <= tick <= self._tray_until_tick:
+            self.liked = liked
+            self._liked_by_id[sid] = liked
 
     def set_liked(self, song_id: str, liked: bool):
         """同步 Wisland 自己触发的红心操作，避免下一次轮询回滚即时反馈。"""
@@ -177,7 +189,8 @@ class NeteaseLog:
         m = _HEADER.match(line)
         if not m:
             return
-        pid, at = int(m.group(1)), _event_mono(int(m.group(4)))
+        tick = int(m.group(4))
+        pid, at = int(m.group(1)), _event_mono(tick)
         if "exitApp" in line:
             self._reset()
             return
@@ -190,8 +203,12 @@ class NeteaseLog:
             t = _track(_json(line))
             if t and (self.track is None or t["id"] != self.track["id"]):
                 self.track, self.pid = t, pid
-                # 新歌尚未出现红心事件时必须先回到空心，不能继承上一首的实心状态。
-                self.liked = self._liked_by_id.get(t["id"], False)
+                # 每次切歌都必须无条件先回到空心。历史缓存可能来自延迟埋点，
+                # 即使歌曲 id 相同也不能拿来初始化新一轮播放；随后只由当前歌曲
+                # 自己带 id 的 is_heart / add_track / del_track 事件改成真实状态。
+                self.liked = False
+                self._tray_song_id = t["id"]
+                self._tray_from_tick, self._tray_until_tick = tick, tick + 2000
                 self.playing = '"playOneTrackInPlayingList"' in line
                 self.pos, self.anchor, self.anchored = 0.0, at, False
             elif t and self.track and not self.track.get("title"):
@@ -214,7 +231,9 @@ class NeteaseLog:
                 self.pos, self.anchor = 0.0, at          # 缓冲结束、真正出声：校正进度
             elif sid and (self.track is None or sid != self.track["id"]):
                 self.track = {"id": sid, "title": "", "artist": "", "album": "", "duration": 0.0, "cover": ""}
-                self.liked = self._liked_by_id.get(sid, False)
+                self.liked = False
+                self._tray_song_id = sid
+                self._tray_from_tick, self._tray_until_tick = tick, tick + 2000
                 self.playing, self.pos, self.anchor, self.anchored, self.pid = True, 0.0, at, False, pid
 
     # ---------------- 输出 ----------------
