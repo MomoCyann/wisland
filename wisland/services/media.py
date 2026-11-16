@@ -399,7 +399,8 @@ class MediaService(QtCore.QObject):
             liked = self.state.get("liked")
             if isinstance(liked, bool):
                 st = dict(self.state)
-                st["liked"] = not liked          # 先即时反馈；下一次日志轮询会校正真实结果
+                st["liked"] = not liked          # 先即时反馈；后续带歌曲 id 的日志事件会校正结果
+                self._netease.set_liked(str(st.get("song_id") or ""), st["liked"])
                 self._publish(st, force=True)
             key_chord(VK_CONTROL, VK_MENU, VK_L)
 

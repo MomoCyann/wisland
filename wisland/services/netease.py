@@ -141,7 +141,11 @@ class NeteaseLog:
         return self.pos + max(0.0, at - self.anchor) if self.playing else self.pos
 
     def _update_liked(self, line: str):
-        """从播放埋点、托盘图标和歌单变更事件恢复当前歌曲的红心状态。"""
+        """只用带歌曲 id 的埋点 / 歌单事件恢复红心状态。
+
+        trayLike 图标刷新事件没有歌曲 id，而且切歌后经常延迟到达；若把它直接套到
+        当前歌曲，就会把上一首的实心红心错误继承给下一首，因此这里刻意忽略它。
+        """
         plain = line.replace('\\"', '"')
         for m in _HEART.finditer(plain):
             sid, liked = m.group(1), m.group(2) == "1"
@@ -155,12 +159,16 @@ class NeteaseLog:
             self._liked_by_id[sid] = liked
             if self.track and self.track.get("id") == sid:
                 self.liked = liked
-        if '"id":"trayLike"' in plain:
-            liked = "/liked.svg" in plain
-            if "/liked.svg" in plain or "/like.svg" in plain:
-                self.liked = liked
-                if self.track:
-                    self._liked_by_id[self.track["id"]] = liked
+
+    def set_liked(self, song_id: str, liked: bool):
+        """同步 Wisland 自己触发的红心操作，避免下一次轮询回滚即时反馈。"""
+        sid = str(song_id or "")
+        if not sid:
+            return
+        with self._lock:
+            self._liked_by_id[sid] = bool(liked)
+            if self.track and self.track.get("id") == sid:
+                self.liked = bool(liked)
 
     def _line(self, line: str):
         self._update_liked(line)
