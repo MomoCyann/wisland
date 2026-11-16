@@ -2,6 +2,7 @@
 """wisland 入口：创建服务、页面、灵动岛，把信号连成"活动"提示。"""
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
 import time
@@ -110,9 +111,14 @@ def set_autostart(on: bool):
 
 def main():
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Wisland.DynamicIsland")
+    except Exception:  # noqa: BLE001
+        pass
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    app.setApplicationName("wisland")
+    app.setApplicationName("Wisland")
+    app.setApplicationDisplayName("Wisland")
     bg.init()
 
     lock = QtCore.QLockFile(str(DATA_DIR / "wisland.lock"))
@@ -125,6 +131,7 @@ def main():
     from .services.audio import AudioService, BrightnessService
     from .services.clash import ClashService
     from .services.clipboard import ClipboardService
+    from .services.hotspot import HotspotService
     from .services.mailcheck import MailCheckService
     from .services.media import MediaService
     from .services.notify import NotifyService
@@ -147,6 +154,7 @@ def main():
     ctx.audio = AudioService()
     ctx.brightness = BrightnessService()
     ctx.radio = RadioService()
+    ctx.hotspot = HotspotService()
     ctx.windows = WindowService()
     ctx.notify = NotifyService()
     ctx.stocks = StockService()
@@ -162,6 +170,7 @@ def main():
     ctx.learn = LearnService()
     ctx.actions = Actions(ctx)
     ctx.notify.opener = lambda path: ctx.windows.open_or_focus(path)
+    ctx.clash.opener = lambda path: ctx.windows.open_or_focus(path)
     ctx.windows.notice.connect(lambda t: ctx.island and ctx.island.activity({"glyph": _G().MESSAGE, "title": t}, 5.0))
     ctx.island = None
 
@@ -170,19 +179,27 @@ def main():
     ctx.pages = {p.key: p for p in pages}
     P = ctx.pages
 
+    peak_cache = {"value": 0.0, "next": 0.0}
+
     def peak():
+        """音频峰值最多每 150ms 查询一次；绘制帧复用缓存，避免每帧跨 COM 调用。"""
+        now = time.monotonic()
+        if now < peak_cache["next"]:
+            return peak_cache["value"]
+        peak_cache["next"] = now + 0.15
         try:
-            return ctx.audio.peak()
+            peak_cache["value"] = ctx.audio.peak()
         except Exception:  # noqa: BLE001
-            return 0.0
+            peak_cache["value"] = 0.0
+        return peak_cache["value"]
 
     island = Island(pages, peak_fn=peak)
     ctx.island = island
     compact = island.compact
 
     # ---------------- 媒体 ----------------
-    media_st = {"key": None, "lyr": None, "prev_view": None, "playing": False}
-    back_timer = QtCore.QTimer(app, singleShot=True, interval=8000)
+    media_st = {"key": None, "lyr": None, "prev_view": None, "playing": False, "paused_pet": False}
+    back_timer = QtCore.QTimer(app, singleShot=True, interval=5000)
 
     def update_lyrics(m):
         k = ctx.lyrics.key(m) if m.get("title") else None
@@ -201,9 +218,10 @@ def main():
     ctx.lyrics.ready.connect(on_lyrics_ready)
 
     def back_to_view():
-        # 暂停一段时间后回到原来的收起视图（时间天气 / 小形象）
-        if not compact.playing() and media_st["prev_view"] and compact.view == "music":
-            compact.set_view(media_st["prev_view"])
+        # 暂停超过 5 秒后统一显示贴纸；恢复播放时 on_media 会自动切回音乐。
+        if not compact.playing() and compact.view == "music":
+            compact.set_view("pet")
+            media_st["paused_pet"] = True
             island._kick()
         media_st["prev_view"] = None
     back_timer.timeout.connect(back_to_view)
@@ -214,14 +232,20 @@ def main():
         update_lyrics(m)
         playing = bool(m.get("playing") and m.get("title"))
         key = (m.get("app_id"), m.get("title"), m.get("artist"))
-        if cfg.get("media.auto_show", True):
-            if playing and (not media_st["playing"] or key != media_st["key"]):
-                back_timer.stop()
+        if playing:
+            back_timer.stop()
+            if media_st["paused_pet"]:
+                # 由暂停自动切到贴纸后，恢复播放必须切回歌曲界面。
+                compact.set_view("music")
+                media_st["paused_pet"] = False
+            elif island.passthrough():
+                compact.set_view("music")
+            elif cfg.get("media.auto_show", True) and (not media_st["playing"] or key != media_st["key"]):
                 if compact.view in ("clock", "pet"):
                     media_st["prev_view"] = compact.view
                     compact.set_view("music")
-            elif not playing and media_st["playing"] and media_st["prev_view"]:
-                back_timer.start()
+        elif m.get("title") and compact.view == "music" and not back_timer.isActive():
+            back_timer.start()
         media_st["playing"], media_st["key"] = playing, key
         island._kick()
     ctx.media.changed.connect(on_media)
@@ -237,7 +261,6 @@ def main():
 
     def on_volume(v, muted):
         P["ctl"].set_volume(v, muted)
-        P["home"].set_muted(muted)
         key = (round(v, 3), muted)
         if vol_state["init"]:
             vol_state["init"] = False
@@ -272,6 +295,12 @@ def main():
         if d.get("ok"):
             clash_state["mode"] = m
     ctx.clash.updated.connect(on_clash)
+    ctx.clash.notice.connect(lambda t: island.activity({"glyph": G.GLOBE, "title": "Clash", "sub": t}, 4))
+
+    # ---------------- 移动热点 ----------------
+    ctx.hotspot.changed.connect(P["ctl"].set_hotspot)
+    ctx.hotspot.notice.connect(lambda t: island.activity({"glyph": G.HOTSPOT, "title": t}, 3.5))
+
 
 
     # ---------------- 消息提醒 ----------------
@@ -279,8 +308,8 @@ def main():
         kind = n.get("kind", "other")
         glyph = {"mail": G.MAIL, "qq": G.CHAT, "wechat": G.MESSAGE}.get(kind, G.BELL)
         sub = "新邮件" if kind == "mail" else (n.get("sender") or "新消息")
-        compact.pet.react("surprise")
-        P["home"].pet.face.react("surprise")
+        compact.react_sticker()
+        P["home"].pet.react("surprise")
         island.activity({"glyph": glyph, "color": KIND_COLORS.get(kind, KIND_COLORS["other"]),
                          "title": n.get("name", kind), "sub": sub}, 4.0)
         if P["msg"].active:
@@ -294,6 +323,17 @@ def main():
         island._kick()
     ctx.notify.notified.connect(on_notified)
     ctx.notify.counts_changed.connect(on_counts)
+    ctx.notify.notice.connect(lambda t: island.activity({"glyph": G.BELL, "title": "消息", "sub": t}, 4.5))
+
+    # 用户手动把 QQ / 微信切到前台，视为已经查看该应用的新消息。
+    def clear_foreground_messages():
+        exe = ctx.windows.foreground_exe()
+        kind = "qq" if exe == "qq.exe" else ("wechat" if exe in ("weixin.exe", "wechat.exe") else "")
+        if kind and ctx.notify.counts.get(kind, 0):
+            ctx.notify.clear(kind)
+    read_timer = QtCore.QTimer(app, interval=1000, timeout=clear_foreground_messages)
+    read_timer.start()
+
     island.flash.connect(ctx.notify.on_flash)
     ctx.mailcheck.new_mail.connect(lambda user, n: ctx.notify._emit(
         {"kind": "mail", "name": "邮件", "source": "imap", "time": time.time()}))
@@ -363,18 +403,51 @@ def main():
             island.toggle("clip")
     island.hotkey.connect(on_hotkey)
 
-    # ---------------- 菜单 / 托盘 ----------------
+    # ---------------- 设置窗口 ----------------
+    def apply_pages():
+        """页面显示 / 顺序改动后：重建导航、按需启停股票行情、刷新消息。"""
+        island.apply_page_layout()
+        keys = island.page_keys()
+        running = bool(getattr(ctx.stocks, "_running", False))
+        if "stock" in keys and not running:
+            ctx.stocks.start()
+        elif "stock" not in keys and running:
+            ctx.stocks.stop()          # 股票页隐藏了就别再请求行情，也不再弹涨跌提醒
+        if P["msg"].active:
+            P["msg"].refresh()
+        island._kick()
+
+    def open_settings():
+        from .ui.settings import SettingsWindow
+        old = getattr(ctx, "settings", None)
+        if old is not None:
+            try:
+                old.close()
+                old.deleteLater()
+            except RuntimeError:
+                pass
+        win = SettingsWindow(ctx, {"apply_pages": apply_pages, "quit": app.quit,
+                                   "autostart_get": autostart_enabled, "autostart_set": set_autostart})
+        ctx.settings = win
+        win.present()
+    ctx.open_settings = open_settings
+    ctx.apply_pages = apply_pages
+
     def reload_cfg():
         cfg.load()
         theme.set_mode(cfg.get("island.theme", "auto"))
         island.register_hotkeys()
         P["home"].build_launcher()
+        island.apply_page_layout()
+        P["ctl"].apply_visibility()
         ctx.weather.refresh()
         island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
 
     def build_menu(menu: QtWidgets.QMenu):
-        menu.addAction("编辑配置 config.json").triggered.connect(lambda: os.startfile(str(CONFIG_PATH)))  # noqa: S606
+        menu.addAction("设置…").triggered.connect(open_settings)
+        menu.addAction("展开 / 收起").triggered.connect(island.toggle)
         menu.addAction("重新加载配置").triggered.connect(reload_cfg)
+        menu.addAction("编辑配置 config.json").triggered.connect(lambda: os.startfile(str(CONFIG_PATH)))  # noqa: S606
         tm = menu.addMenu("主题")
         for mode, label in THEME_NAMES:
             a = tm.addAction(("✓  " if cfg.get("island.theme") == mode else "    ") + label)
@@ -393,12 +466,9 @@ def main():
         menu.addSeparator()
         menu.addAction("退出 wisland").triggered.connect(app.quit)
 
+    # 右键灵动岛 = 打开设置窗口（快捷项留在托盘菜单里）
     def show_menu(pos):
-        m = styled_menu(island)
-        build_menu(m)
-        island.locks.add("menu")
-        m.aboutToHide.connect(lambda: island.locks.discard("menu"))
-        m.popup(pos)
+        open_settings()
     island.menu_requested.connect(show_menu)
     # 导航：「主页」标签放在播放器封面正上方
     def nav_anchor():
@@ -416,6 +486,10 @@ def main():
     # 按钮只在 常驻展开 ↔ 悬停展开 之间切换；长关用双击灵动岛切换
     home.a_pin.clicked.connect(lambda: island.set_expand_mode("hover" if island.expand_mode() == "always" else "always"))
     home.a_pt.clicked.connect(lambda: island.set_passthrough(not island.passthrough()))
+    home.a_mute.clicked.connect(lambda: island.set_capture_visible(not island.capture_visible()))
+    home.a_live.clicked.connect(lambda: island.set_fullscreen_visible(not island.fullscreen_visible()))
+    island.capture_visible_changed.connect(home.set_capture_visible)
+    island.fullscreen_visible_changed.connect(home.set_fullscreen_visible)
 
     def on_mode(mode):
         # 按钮只表示 常驻展开 / 悬停展开；长关不在按钮上显示
@@ -427,21 +501,23 @@ def main():
     def on_pt(on):
         home.a_pt.set_on(on, None, "可穿透")
         if on:
-            compact.set_view("pet")            # 穿透时直接显示小形象
+            # 正在播放时保留音乐状态；没有歌曲时才显示用户贴纸。
+            compact.set_view("music" if compact.playing() else "pet")
             island._kick()
     island.mode_changed.connect(on_mode)
     island.passthrough_changed.connect(on_pt)
     on_mode(island.expand_mode())
     home.a_pt.set_on(island.passthrough(), None, "可穿透")
+    home.set_capture_visible(island.capture_visible())
+    home.set_fullscreen_visible(island.fullscreen_visible())
     if island.passthrough():
-        compact.set_view("pet")
-    island.nav.add_right_button(G.GEAR, "设置", lambda: show_menu(QtGui.QCursor.pos()))
+        compact.set_view("music" if compact.playing() else "pet")
+    island.nav.add_right_button(G.GEAR, "设置", lambda: open_settings())
 
     tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff"))), app)
     tray.setToolTip("wisland 灵动岛")
     tmenu = QtWidgets.QMenu()
-    tmenu.aboutToShow.connect(lambda: (tmenu.clear(), tmenu.addAction("展开 / 收起").triggered.connect(island.toggle),
-                                       build_menu(tmenu)))
+    tmenu.aboutToShow.connect(lambda: (tmenu.clear(), build_menu(tmenu)))
     tray.setContextMenu(tmenu)
     tray.activated.connect(lambda r: island.toggle() if r == QtWidgets.QSystemTrayIcon.ActivationReason.Trigger else None)
     tray.show()
@@ -466,21 +542,31 @@ def main():
         except Exception:  # noqa: BLE001
             pass
     fs_timer = QtCore.QTimer(app, interval=1000, timeout=check_fullscreen)
-
     # ---------------- 启动 ----------------
     island.show()
-    for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.windows, ctx.notify, ctx.stocks,
+    if os.environ.get("WISLAND_DEBUG"):
+        def _dbg():
+            print(f"[dbg] geo={island.geometry()} body={island.body} path_empty={island.path.isEmpty()} "
+                  f"expanded={island.expanded} vis={island.isVisible()} sw={island.sw.x:.0f} sh={island.sh.x:.0f} "
+                  f"compact_a={island.compact_a.x:.2f} page={island._page_key} mode={island.mode}", flush=True)
+        QtCore.QTimer(app, interval=2000, timeout=_dbg).start()
+        _dbg()
+    for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.hotspot, ctx.windows, ctx.notify, ctx.stocks,
               ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
         try:
             if hasattr(s, "start"):
                 s.start()
         except Exception:  # noqa: BLE001
             traceback.print_exc()
+    if "stock" not in island.page_keys():
+        ctx.stocks.stop()              # 股票页在设置里被隐藏时不必请求行情
     fs_timer.start()
+    if os.environ.get("WISLAND_OPEN_SETTINGS"):     # 调试用：启动后直接弹出设置窗口
+        QtCore.QTimer.singleShot(1200, open_settings)
 
     def shutdown():
         ctx.live.stop(wait=True)
-        for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.notify, ctx.stocks,
+        for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.hotspot, ctx.notify, ctx.stocks,
                   ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
             try:
                 s.stop()

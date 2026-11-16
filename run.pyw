@@ -19,12 +19,13 @@ def _relaunch_windowless():
             return
         import subprocess
         base = os.path.dirname(getattr(sys, "_base_executable", "") or sys.executable)
-        pyw = os.path.join(base, "pythonw.exe")
+        named = os.path.join(ROOT, ".venv", "Scripts", "Wisland.exe")
+        pyw = named if os.path.isfile(named) else os.path.join(base, "pythonw.exe")
         if not os.path.isfile(pyw):
             return
         env = dict(os.environ, WISLAND_RELAUNCHED="1")
         venv_py = os.path.join(sys.prefix, "Scripts", "python.exe")
-        if sys.prefix != sys.base_prefix and os.path.isfile(venv_py):
+        if pyw != named and sys.prefix != sys.base_prefix and os.path.isfile(venv_py):
             env["__PYVENV_LAUNCHER__"] = venv_py
         subprocess.Popen([pyw, os.path.abspath(__file__)] + sys.argv[1:], cwd=ROOT, env=env,
                          creationflags=0x00000008 | 0x00000200,   # DETACHED_PROCESS | NEW_PROCESS_GROUP

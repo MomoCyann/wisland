@@ -152,6 +152,7 @@ def inbox_files(profile: Path) -> list[Path]:
 class NotifyService(QtCore.QObject):
     notified = QtCore.Signal(dict)        # {kind, name, source:'toast'|'flash'|'file', time, [sender]}
     counts_changed = QtCore.Signal(dict)  # {kind: n}
+    notice = QtCore.Signal(str)           # 需要告诉用户的一句话（例如没配置邮件客户端）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -195,14 +196,20 @@ class NotifyService(QtCore.QObject):
             self.counts_changed.emit(dict(self.counts))
 
     def open(self, kind: str):
+        """点消息页的应用卡片：切到它的窗口 / 启动它。
+
+        路径来源：config.json → notify.open.<kind>；留空时退回 flash_processes 里的 exe 名
+        （open_or_focus 会自己解析成安装路径，也能把收进托盘的主窗口叫出来）。"""
         path = cfg.get(f"notify.open.{kind}") or next(
             (exe for exe, m in (cfg.get("notify.flash_processes") or {}).items() if m.get("kind") == kind), "")
-        if path:
-            opener = getattr(self, "opener", None)     # app.py 注入：已打开则切换窗口
-            if opener is not None:
-                opener(expand(path))
-            else:
-                launch(expand(path))
+        if not path:
+            self.notice.emit(f"{kind}：还没有配置程序路径（设置 → 通知与应用）")
+            self.clear(kind)
+            return
+        opener = getattr(self, "opener", None)     # app.py 注入：已打开则切换窗口
+        res = opener(expand(path)) if opener is not None else ("launched" if launch(expand(path)) else "failed")
+        if res == "failed" and kind == "mail":
+            self.notice.emit("邮件：没找到邮件客户端，请在设置 → 通知与应用里填写路径")
         self.clear(kind)
 
     def on_flash(self, hwnd: int):

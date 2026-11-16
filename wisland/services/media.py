@@ -28,6 +28,7 @@ except Exception:  # noqa: BLE001
 
 POLL_S = 0.7
 VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_PLAY_PAUSE = 0xB0, 0xB1, 0xB3
+VK_CONTROL, VK_MENU, VK_L = 0x11, 0x12, 0x4C
 _user32 = ctypes.WinDLL("user32")
 
 
@@ -38,6 +39,19 @@ def media_key(vk: int):
         _user32.keybd_event(vk, 0, 0x1 | 0x2, 0)    # | KEYEVENTF_KEYUP
     except Exception:  # noqa: BLE001
         traceback.print_exc()
+
+
+def key_chord(*vks: int):
+    """发送组合键；网易云默认用 Ctrl+Alt+L 喜欢 / 取消喜欢当前歌曲。"""
+    try:
+        for vk in vks:
+            _user32.keybd_event(vk, 0, 0, 0)
+        for vk in reversed(vks):
+            _user32.keybd_event(vk, 0, 0x2, 0)      # KEYEVENTF_KEYUP
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+
+
 _PLAYING = 4  # GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
 
 _FRIENDLY = [
@@ -93,7 +107,7 @@ def _download_cover(url: str):
 def _empty_state() -> dict:
     return {
         "has_session": False, "app_id": "", "app_name": "", "title": "", "artist": "",
-        "album": "", "playing": False, "position": 0.0, "duration": 0.0,
+        "album": "", "playing": False, "liked": None, "position": 0.0, "duration": 0.0,
         "stamp": time.monotonic(), "can_prev": False, "can_next": False, "song_id": "", "source": "",
     }
 
@@ -265,7 +279,7 @@ class MediaService(QtCore.QObject):
 
         st = {
             "has_session": True, "app_id": app_id, "app_name": friendly_name(app_id),
-            "title": title, "artist": artist, "album": album, "playing": playing,
+            "title": title, "artist": artist, "album": album, "playing": playing, "liked": None,
             "position": pos, "duration": dur, "stamp": time.monotonic(),
             "can_prev": can_prev, "can_next": can_next, "song_id": "", "source": "smtc",
         }
@@ -291,7 +305,7 @@ class MediaService(QtCore.QObject):
         st = {
             "has_session": True, "app_id": "cloudmusic.exe", "app_name": "网易云音乐",
             "title": ne["title"], "artist": ne["artist"], "album": ne["album"], "playing": ne["playing"],
-            "position": ne["position"], "duration": ne["duration"], "stamp": ne["stamp"],
+            "liked": ne.get("liked"), "position": ne["position"], "duration": ne["duration"], "stamp": ne["stamp"],
             "can_prev": True, "can_next": True, "song_id": ne["song_id"], "source": "netease",
         }
         key = ("netease", ne["song_id"])
@@ -376,6 +390,18 @@ class MediaService(QtCore.QObject):
 
     def prev(self):
         self._submit(lambda s: s.try_skip_previous_async(), VK_MEDIA_PREV)
+
+    def like(self):
+        """喜欢 / 取消喜欢网易云当前歌曲（网易云默认全局快捷键 Ctrl+Alt+L）。"""
+        source = str(self.state.get("source") or "").lower()
+        app_id = str(self.state.get("app_id") or "").lower()
+        if source == "netease" or "cloudmusic" in app_id:
+            liked = self.state.get("liked")
+            if isinstance(liked, bool):
+                st = dict(self.state)
+                st["liked"] = not liked          # 先即时反馈；下一次日志轮询会校正真实结果
+                self._publish(st, force=True)
+            key_chord(VK_CONTROL, VK_MENU, VK_L)
 
     def seek(self, seconds: float):
         def go(s):

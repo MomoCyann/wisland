@@ -32,7 +32,24 @@ DEFAULTS: dict = {
         "pinned": False,            # 旧版"保持展开"（兼容）
         "compact_view": "clock",    # 收起态视图：clock / pet / music（滚轮切换）
         "auto_cycle_s": 30,         # 时间天气与小形象自动轮换的间隔（秒），0 = 不轮换
+        "compact_media_width": 640,  # 收起态音乐胶囊宽度；超长歌词在内部滚动
+        "double_click_long_off": True,
+        "sticker_dir": "march7stickers",  # 主页和可穿透小形象共用；支持 png/jpg/webp/gif/bmp
         "passthrough": False,       # 可穿透：鼠标穿过灵动岛，只响应右键（不影响展开 / 收起）
+        # 导航里的页面：顺序即显示顺序，visible=false 的页面整页隐藏（在设置页面里调整）
+        # 留空 = 全部显示、按代码顺序。例：[{"key": "home", "visible": true}, {"key": "stock", "visible": false}]
+        "pages": [],
+    },
+    "controls": {
+        # 控制页右侧磁贴 / 下方滑块的显示开关
+        "tiles": {"wifi": True, "bt": True, "hotspot": True, "audio": True},
+        "show_volume": True,
+        "show_brightness": True,
+        "show_clash": True,
+        "show_mixer": True,
+    },
+    "hotspot": {
+        "interval_s": 5,            # 移动热点状态轮询间隔
     },
     "hotkeys": {
         "toggle": "Ctrl+Alt+I",
@@ -40,7 +57,7 @@ DEFAULTS: dict = {
         "clipboard": "Ctrl+Alt+V",
     },
     "media": {
-        "auto_show": True,           # 开始播放时收起态自动切到音乐（暂停 8 秒后切回）
+        "auto_show": True,           # 开始播放时收起态自动切到音乐（暂停 5 秒后切到贴纸）
         "lyrics": True,              # 收起态显示歌词（网易云公开歌词接口）
         "netease_log": True,         # 读取网易云本地日志获得播放状态与进度（网易云默认不接入系统媒体控件）
         "priority": ["cloudmusic", "bilibili", "chrome", "zen", "msedge", "firefox"],
@@ -96,10 +113,16 @@ DEFAULTS: dict = {
     },
     "apps": {
         # 托盘里的应用（窗口被隐藏）：发送应用自己的"显示窗口"热键让它恢复（微信默认 Ctrl+Alt+W）
+        # QQ 留空：它自带「唤起主窗口」热键，在 QQ 设置里配好后把同一个组合填到这里才会生效
         "restore_hotkey": {
             "weixin.exe": "Ctrl+Alt+W",
             "wechat.exe": "Ctrl+Alt+W",
+            "qq.exe": "",
         },
+        # 允许强行把「收进托盘后被隐藏」的主窗口 show 出来的应用。
+        # 不在这个列表里的只做正常激活 + 发热键。QQ 和微信都实测可以直接 show 出来，
+        # 所以默认都放进来；热键只作为兜底。
+        "reveal_hidden": ["qq.exe", "weixin.exe", "wechat.exe"],
     },
     "mail": {
         "interval_s": 120,
@@ -124,6 +147,7 @@ DEFAULTS: dict = {
         "source": "",
     },
     "clipboard": {"max": 10},      # 只保留最近 10 条（置顶的不计）
+    "launcher_enabled": True,
     "launcher": [
         {"name": "文件资源管理器", "path": "C:/Windows/explorer.exe"},
     ],

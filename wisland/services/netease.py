@@ -23,7 +23,7 @@ import time
 import psutil
 
 ELOG = os.path.expandvars(r"%LOCALAPPDATA%\NetEase\CloudMusic\cloudmusic.elog")
-PRELOAD_BYTES = 4 * 1024 * 1024     # 启动时只回看日志末尾这么多字节
+PRELOAD_BYTES = 32 * 1024 * 1024    # 回看约一首歌的日志，恢复当前歌曲及红心状态
 MAX_CARRY = 1024 * 1024
 
 # 解码表：密文字节 -> 明文字节
@@ -38,6 +38,8 @@ _HEADER = re.compile(r"^\[(\d+):(\d+):(\d{4}/\d{6}):(\d+):([A-Z]+):")
 _SEEK = re.compile(r'"setPlayingPosition"\s*,\s*(-?\d+(?:\.\d+)?)')
 _STATE = re.compile(r'"native[^"]*state"\s*,\s*(\d+)')
 _EXIT = re.compile(r"Process\s+(\d+)\s+exited")
+_HEART = re.compile(r'"id"\s*:\s*"?(\d+)"?.{0,1800}?"is_heart"\s*:\s*([01])')
+_LIKE_CHANGE = re.compile(r'"op"\s*:\s*"(add_track|del_track)".{0,600}?"ids"\s*:\s*\[\s*(\d+)')
 
 _k32 = ctypes.WinDLL("kernel32")
 _k32.GetTickCount64.restype = ctypes.c_ulonglong
@@ -89,6 +91,8 @@ class NeteaseLog:
     def _reset(self):
         self.track: dict | None = None
         self.playing = False
+        self.liked: bool | None = None
+        self._liked_by_id: dict[str, bool] = {}
         self.pos = 0.0              # 暂停时的位置；播放时为 anchor 时刻的位置
         self.anchor = 0.0           # 播放中：位置 = pos + (now - anchor)
         self.anchored = False
@@ -136,7 +140,30 @@ class NeteaseLog:
     def _now_pos(self, at: float) -> float:
         return self.pos + max(0.0, at - self.anchor) if self.playing else self.pos
 
+    def _update_liked(self, line: str):
+        """从播放埋点、托盘图标和歌单变更事件恢复当前歌曲的红心状态。"""
+        plain = line.replace('\\"', '"')
+        for m in _HEART.finditer(plain):
+            sid, liked = m.group(1), m.group(2) == "1"
+            self._liked_by_id[sid] = liked
+            if self.track and self.track.get("id") == sid:
+                self.liked = liked
+        change = _LIKE_CHANGE.search(plain)
+        if change:
+            liked = change.group(1) == "add_track"
+            sid = change.group(2)
+            self._liked_by_id[sid] = liked
+            if self.track and self.track.get("id") == sid:
+                self.liked = liked
+        if '"id":"trayLike"' in plain:
+            liked = "/liked.svg" in plain
+            if "/liked.svg" in plain or "/like.svg" in plain:
+                self.liked = liked
+                if self.track:
+                    self._liked_by_id[self.track["id"]] = liked
+
     def _line(self, line: str):
+        self._update_liked(line)
         if not line.startswith("[") or "【playing】" not in line and "exit" not in line:
             return
         m = _HEADER.match(line)
@@ -155,6 +182,8 @@ class NeteaseLog:
             t = _track(_json(line))
             if t and (self.track is None or t["id"] != self.track["id"]):
                 self.track, self.pid = t, pid
+                # 新歌尚未出现红心事件时必须先回到空心，不能继承上一首的实心状态。
+                self.liked = self._liked_by_id.get(t["id"], False)
                 self.playing = '"playOneTrackInPlayingList"' in line
                 self.pos, self.anchor, self.anchored = 0.0, at, False
             elif t and self.track and not self.track.get("title"):
@@ -177,6 +206,7 @@ class NeteaseLog:
                 self.pos, self.anchor = 0.0, at          # 缓冲结束、真正出声：校正进度
             elif sid and (self.track is None or sid != self.track["id"]):
                 self.track = {"id": sid, "title": "", "artist": "", "album": "", "duration": 0.0, "cover": ""}
+                self.liked = self._liked_by_id.get(sid, False)
                 self.playing, self.pos, self.anchor, self.anchored, self.pid = True, 0.0, at, False, pid
 
     # ---------------- 输出 ----------------
@@ -194,4 +224,4 @@ class NeteaseLog:
                 pos = min(pos, t["duration"])
             return {"song_id": t["id"], "title": t["title"], "artist": t["artist"], "album": t["album"],
                     "duration": t["duration"], "cover": t["cover"], "playing": self.playing,
-                    "position": pos, "stamp": now}
+                    "liked": self.liked, "position": pos, "stamp": now}

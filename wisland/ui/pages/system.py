@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
-"""控制中心（音量 / 亮度 / WiFi / 蓝牙 / Clash Verge）、窗口切换、性能监控。"""
+"""控制中心（音量 / 亮度 / WLAN / 蓝牙 / 移动热点 / 声音输出 / Clash Verge）、窗口切换、性能监控。"""
 from __future__ import annotations
+
+import re
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from ...core.bg import run_bg
+from ...core.config import cfg
 from ..anim import clamp
 from ..theme import G, W, icon_font, theme, ui_font
 from ..widgets import (Card, Hoverable, IconButton, Label, PillButton, ScrollArea, Segmented, Slider, Sparkline,
-                       Themed, Tile, fmt_bytes, hbox, painter, vbox)
+                       Themed, Tile, TogglePill, fmt_bytes, hbox, painter, vbox)
 from .base import Page
 
 Qt = QtCore.Qt
 MODES = [("rule", "规则"), ("global", "全局"), ("direct", "直连")]
+
+
+def short_device(name: str) -> str:
+    """'扬声器 (2- Realtek(R) Audio)' -> '扬声器'（磁贴上只留设备本身的名字）。"""
+    s = re.sub(r"\s*[\(（][^\(）]*[\)）]\s*$", "", str(name or "")).strip()
+    return s or str(name or "")
 
 
 def short_node(name: str) -> str:
@@ -69,52 +78,222 @@ def styled_menu(parent=None) -> QtWidgets.QMenu:
     return m
 
 
+class AppAudioIcon(Hoverable):
+    """音量合成器里的应用图标；点击切换该应用静音。"""
+    def __init__(self, ctx, info: dict, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.info = dict(info)
+        self.pm = None
+        self.setFixedSize(38, 38)
+        self.setToolTip("点击静音 / 取消静音")
+        self.clicked.connect(self._toggle)
+        self._load_icon()
+
+    def _load_icon(self):
+        img = self.ctx.windows.exe_icon(self.info.get("exe") or "")
+        self.pm = QtGui.QPixmap.fromImage(img) if isinstance(img, QtGui.QImage) and not img.isNull() else None
+
+    def set_info(self, info: dict):
+        old_exe = self.info.get("exe")
+        self.info = dict(info)
+        if old_exe != self.info.get("exe"):
+            self._load_icon()
+        self.update()
+
+    def _toggle(self):
+        muted = not bool(self.info.get("muted"))
+        self.info["muted"] = muted
+        self.ctx.audio.set_session_muted(self.info["key"], muted)
+        self.update()
+
+    def paintEvent(self, e):
+        p = painter(self)
+        r = QtCore.QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        if self._hover.x > 0.01:
+            c = theme.hover()
+            c.setAlphaF(c.alphaF() * self._hover.x)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(c)
+            p.drawEllipse(r)
+        p.setOpacity(0.38 if self.info.get("muted") else 1.0)
+        if self.pm is not None:
+            p.drawPixmap(r.adjusted(5, 5, -5, -5).toRect(), self.pm)
+        else:
+            p.setFont(icon_font(17))
+            p.setPen(theme.text(0.9))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, G.VOLUME if self.info.get("system") else G.APPS)
+        p.setOpacity(1.0)
+        if self.info.get("muted"):
+            p.setFont(icon_font(11))
+            p.setPen(QtGui.QColor("#ef4444"))
+            p.drawText(QtCore.QRectF(r.right() - 14, r.bottom() - 14, 14, 14), Qt.AlignmentFlag.AlignCenter, G.MUTE)
+
+
+class AppVolumeRow(QtWidgets.QWidget):
+    def __init__(self, ctx, info: dict, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.info = dict(info)
+        self.icon = AppAudioIcon(ctx, info)
+        self.name = Label(info.get("name") or "未知应用", 11.5, W.Medium)
+        self.name.setFixedWidth(82)
+        self.slider = Slider("", height=30)
+        self.slider.moved.connect(lambda v: self.ctx.audio.set_session_volume(self.info["key"], v))
+        self.setLayout(hbox(self.icon, self.name, (self.slider, 1), spacing=8, margins=(2, 2, 6, 2)))
+        self.setFixedHeight(44)
+        self.set_info(info)
+
+    def set_info(self, info: dict):
+        self.info = dict(info)
+        self.icon.set_info(info)
+        self.name.setText(info.get("name") or "未知应用")
+        self.name.setToolTip(info.get("exe") or self.name.text())
+        self.slider.label = "静音" if info.get("muted") else ""
+        self.slider.set_value(float(info.get("volume") or 0), animate=False)
+        self.slider.update()
+
+
+class AppMixer(Card):
+    """最多显示三项的应用音量合成器，更多应用在内部滚动。"""
+    def __init__(self, ctx, parent=None):
+        super().__init__(parent, 16)
+        self.ctx = ctx
+        self.rows: dict[str, AppVolumeRow] = {}
+        self.title = Label("音量合成器", 12.5, W.DemiBold)
+        self.hint = Label("点击应用图标静音", 10.5, level=3)
+        self.scroll = ScrollArea()
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll.setFixedHeight(142)       # 3 × 44px 行高 + 2 × 5px 间距
+        self.setFixedWidth(270)
+        self.rows_lay = QtWidgets.QVBoxLayout(self.scroll.inner)
+        self.rows_lay.setContentsMargins(0, 0, 0, 0)
+        self.rows_lay.setSpacing(5)
+        self.empty = Label("暂无正在使用声音的应用", 11.5, level=3)
+        self.rows_lay.addWidget(self.empty)
+        self.rows_lay.addStretch(1)
+        self.setLayout(vbox(hbox(self.title, None, self.hint), self.scroll, spacing=5, margins=(12, 8, 8, 8)))
+
+    def set_sessions(self, sessions: list[dict]):
+        keys = [str(x.get("key")) for x in sessions]
+        for key in list(self.rows):
+            if key not in keys:
+                self.rows.pop(key).deleteLater()
+        self.empty.setVisible(not sessions)
+        for info in sessions:
+            key = str(info.get("key"))
+            row = self.rows.get(key)
+            if row is None:
+                row = AppVolumeRow(self.ctx, info)
+                self.rows[key] = row
+            else:
+                row.set_info(info)
+        while self.rows_lay.count():
+            self.rows_lay.takeAt(0)
+        for info in sessions:
+            self.rows_lay.addWidget(self.rows[str(info.get("key"))])
+        if not sessions:
+            self.rows_lay.addWidget(self.empty)
+        self.rows_lay.addStretch(1)
+        rows_h = len(sessions) * 44 + max(0, len(sessions) - 1) * 5
+        self.scroll.inner.setMinimumHeight(max(142, rows_h))
+
+
 class ControlsPage(Page):
-    key, glyph, title, height = "ctl", G.SLIDERS, "控制", 180
+    key, glyph, title, height = "ctl", G.SLIDERS, "控制", 301
 
     def __init__(self, ctx):
         super().__init__(ctx)
+        self._radio = {}
+        self._clash = {}
+        self._hs = {}
+        self._clash_ok = False
+        self._audio_dev = None
+
         self.vol = Slider(G.VOLUME)
         self.bri = Slider(G.SUN)
         self.vol.moved.connect(self._set_vol)
         self.vol.icon_clicked.connect(lambda: ctx.audio.toggle_mute())
         self.bri.moved.connect(lambda v: ctx.brightness.set(None, round(v * 100)))
+
+        # ---- 右侧磁贴：WLAN / 蓝牙 / 移动热点 / 声音输出 ----
         self.wifi = Tile(G.WIFI, "WLAN")
         self.bt = Tile(G.BT, "蓝牙")
-        self.proxy = Tile(G.GLOBE, "系统代理")
-        self.tun = Tile(G.BOLT, "TUN 模式")
-        self._radio = {}
-        self._clash = {}
+        self.hs = Tile(G.HOTSPOT, "移动热点")
+        self.audio = Tile(G.HEADPHONE, "声音输出")
+        self.hs.set_state(False, "已关闭")
+        self.audio.set_state(True, "—")
         self.wifi.clicked.connect(lambda: self._toggle("wifi"))
         self.bt.clicked.connect(lambda: self._toggle("bt"))
-        self.proxy.clicked.connect(lambda: ctx.clash.set_sysproxy(not self._clash.get("sysproxy")))
-        self.tun.clicked.connect(lambda: ctx.clash.set_tun(not self._clash.get("tun")))
-        grid = QtWidgets.QGridLayout()
-        grid.setSpacing(8)
-        for i, t in enumerate((self.wifi, self.bt, self.proxy, self.tun)):
-            grid.addWidget(t, i // 2, i % 2)
+        self.hs.clicked.connect(self._toggle_hotspot)
+        self.audio.clicked.connect(self._audio_menu)
+        self.grid = QtWidgets.QGridLayout()
+        self.grid.setSpacing(8)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.gw = QtWidgets.QWidget()
+        self.gw.setLayout(self.grid)
+        self.gw.setFixedWidth(270)
 
-        # Clash 卡片
+        # ---- Clash 卡片（模式 / 节点 / 系统代理 / TUN 都在这里）----
         self.card = Card(radius=18)
-        self.mode = Segmented([n for _, n in MODES])
-        self.mode.setFixedWidth(168)
+        self.mode = Segmented([n for _, n in MODES], height=32)
+        self.mode.setMinimumWidth(250)
         self.mode.changed.connect(lambda i: ctx.clash.set_mode(MODES[i][0]))
-        self.node = PillButton("节点", G.GLOBE, height=28)
+        self.node = PillButton("节点", G.GLOBE, height=32)
         self.node.clicked.connect(self._node_menu)
-        self.node.setMaximumWidth(190)
+        self.node.setMaximumWidth(320)
         self.speed = Label("", 11.5, level=2, num=True)
         self.clash_state = Label("Clash Verge", 13, W.DemiBold)
-        openv = IconButton(G.OPEN, 28, 12, "打开 Clash Verge")
-        openv.clicked.connect(lambda: ctx.clash.open_app())
-        self.card.setLayout(vbox(hbox(self.clash_state, None, self.speed, openv, spacing=6),
-                                 hbox(self.mode, None, self.node, spacing=8), spacing=6, margins=(14, 10, 10, 10)))
-        left = vbox(self.vol, self.bri, self.card, None, spacing=8)
-        for w in (self.card, self.proxy, self.tun):
-            w.hide()
-        gw = QtWidgets.QWidget()
-        gw.setLayout(grid)
-        gw.setFixedWidth(270)
-        self.setLayout(hbox((left, 1), vbox(None, gw, None), spacing=10))
+        self.open_btn = IconButton(G.OPEN, 28, 12, "打开 / 唤出 Clash Verge")
+        self.open_btn.clicked.connect(lambda: ctx.clash.open_app())
+        self.sys_proxy = TogglePill(G.GLOBE, "系统代理")
+        self.sys_tun = TogglePill(G.BOLT, "TUN")
+        self.sys_proxy.clicked.connect(self._toggle_sysproxy)
+        self.sys_tun.clicked.connect(self._toggle_tun)
+        self.card.setFixedHeight(217)
+        self.card.setLayout(vbox(
+            hbox(self.clash_state, None, self.speed, self.open_btn, spacing=8),
+            self.mode,
+            self.node,
+            hbox(self.sys_proxy, self.sys_tun, None, spacing=10),
+            spacing=12, margins=(14, 12, 14, 12)))
+
+        left = vbox(self.vol, self.bri, self.card, spacing=8)
+        self.card.hide()
+        self.mixer = AppMixer(ctx)
+        ctx.audio.sessions_changed.connect(self.mixer.set_sessions)
+        # 音量合成器放在 WLAN / 蓝牙 / 热点 / 输出设备这一列，不再横跨整页。
+        right = vbox(self.gw, self.mixer, spacing=8)
+        self.setLayout(hbox((left, 1), right, spacing=10))
+        self.apply_visibility()
+        self.set_audio_devices()
+        self._refresh_audio()          # 启动时先在后台把设备列表备好，打开这一页就不用等
+
+    # ---------------- 显示哪些磁贴 ----------------
+    def apply_visibility(self):
+        """按 config.json → controls 里的开关显示 / 隐藏磁贴与滑块（设置页面里可改）。"""
+        tiles = cfg.get("controls.tiles") or {}
+        shown = []
+        for key, w in (("wifi", self.wifi), ("bt", self.bt), ("hotspot", self.hs), ("audio", self.audio)):
+            on = bool(tiles.get(key, True))
+            w.setVisible(on)
+            if on:
+                shown.append(w)
+        while self.grid.count():
+            self.grid.removeWidget(self.grid.itemAt(0).widget())
+        for i, w in enumerate(shown):
+            self.grid.addWidget(w, i // 2, i % 2)
+        for c in range(2):
+            self.grid.setColumnStretch(c, 1)
+        self.gw.setVisible(bool(shown))
+        self.vol.setVisible(bool(cfg.get("controls.show_volume", True)))
+        self.bri.setVisible(bool(cfg.get("controls.show_brightness", True)))
+        self.card.setVisible(bool(cfg.get("controls.show_clash", True)) and self._clash_ok)
+        show_mixer = bool(cfg.get("controls.show_mixer", True))
+        self.mixer.setVisible(show_mixer)
+        self.set_height(301 if show_mixer else 208)
+        if not show_mixer:
+            self.ctx.audio.set_session_polling(False)
 
     def _toggle(self, kind: str):
         """可用就切换开关；检测不到（台式机没蓝牙 / 驱动不支持）时打开对应的系统设置页。"""
@@ -129,13 +308,59 @@ class ControlsPage(Page):
         else:
             self.ctx.radio.set_wifi(not self._radio.get("wifi_on"))
 
+    def _toggle_hotspot(self):
+        import os
+        if not self._hs.get("available", False):
+            os.startfile("ms-settings:network-mobilehotspot")  # noqa: S606
+            if self.island:
+                self.island.collapse()
+            return
+        self.ctx.hotspot.toggle()
+
     def _set_vol(self, v: float):
         a = self.ctx.audio
         a.set_volume(v)
         if v > 0.001 and a.muted():
             a.set_muted(False)          # 调大音量时顺便取消静音（否则看起来"没反应"）
 
-    # --- 数据 ---
+    # ---------------- 声音输出设备 ----------------
+    def set_audio_devices(self, devs=None):
+        """渲染「声音输出」磁贴。devs 为空时读缓存——枚举播放设备要走十几次 COM，
+        在主线程做会把打开页面卡一下，所以枚举统一放后台（AudioService.warm_output）。"""
+        if devs is None:
+            devs = self.ctx.audio.output_devices(cached=True)
+        dev = next((d for d in devs if d["default"]), None) or (devs[0] if devs else None)
+        self._audio_dev = dev
+        if dev is None:
+            self.audio.set_state(True, "—", False)
+            self.audio.setToolTip("正在读取播放设备…")
+        else:
+            self.audio.set_state(True, dev["name"], True)
+            self.audio.setToolTip(f"当前输出：{dev.get('full_name') or dev['name']}\n点击切换播放设备")
+
+    def _refresh_audio(self):
+        self.ctx.audio.warm_output(self.set_audio_devices)
+
+    def _audio_menu(self):
+        devs = self.ctx.audio.output_devices(cached=True) or self.ctx.audio.output_devices()
+        if not devs:
+            return
+        m = styled_menu(self)
+        for d in devs:
+            name = d.get("full_name") or d.get("name") or "未命名设备"
+            a = m.addAction(("✓  " if d["default"] else "    ") + name)
+            a.setToolTip(name)
+            a.triggered.connect(lambda _=False, i=d["id"]: self._use_audio(i))
+        if self.island:
+            self.island.locks.add("menu")
+            m.aboutToHide.connect(lambda: self.island.locks.discard("menu"))
+        m.popup(QtGui.QCursor.pos())
+
+    def _use_audio(self, dev_id: str):
+        self.ctx.audio.set_default_output(dev_id)
+        QtCore.QTimer.singleShot(250, self._refresh_audio)
+
+    # ---------------- 数据 ----------------
     def set_volume(self, v: float, muted: bool):
         self.vol.glyph = G.MUTE if muted else (G.VOLUME_LOW if v < 0.34 else G.VOLUME)
         self.vol.label = "静音" if muted else ""
@@ -160,15 +385,48 @@ class ControlsPage(Page):
         bt_ok = d.get("bt_available", True)
         self.bt.set_state(bool(d.get("bt_on")),
                           ("已开启" if d.get("bt_on") else "已关闭") if bt_ok else "未检测到 · 点击打开设置", bt_ok)
+        self.wifi.setToolTip(("已连接：" + d["wifi_ssid"]) if d.get("wifi_ssid") else "WLAN")
+        self.bt.setToolTip("蓝牙" if bt_ok else "这台电脑没有可切换的蓝牙适配器，点击打开系统设置")
+
+    def set_hotspot(self, d: dict):
+        self._hs = d
+        ok = bool(d.get("available"))
+        on = bool(d.get("on"))
+        if not ok:
+            self.hs.set_state(False, d.get("reason") or "不可用 · 点击打开设置", False)
+            self.hs.setToolTip(d.get("reason") or "移动热点不可用，点击打开系统设置")
+            return
+        sub = ("已开启" if on else "已关闭")
+        if on and d.get("ssid"):
+            sub = f"{d['ssid']}"
+        if on and d.get("clients"):
+            sub += f" · {d['clients']} 台"
+        self.hs.set_state(on, sub, True)
+        self.hs.setToolTip(f"移动热点：{'已开启' if on else '已关闭'}"
+                           + (f"\n名称 {d.get('ssid')}，{d.get('clients', 0)} 台设备" if on else ""))
+
+    def _toggle_sysproxy(self):
+        """点一下立刻变色（乐观更新），后台写完再由下一次轮询校准。
+        不然 1 秒的轮询间隔里用户看不到反应，很容易再点一下又给关回去。"""
+        want = not bool(self._clash.get("sysproxy"))
+        self._clash["sysproxy"] = want
+        self.sys_proxy.set_on(want, "系统代理", True)
+        self.ctx.clash.set_sysproxy(want)
+
+    def _toggle_tun(self):
+        want = not bool(self._clash.get("tun"))
+        self._clash["tun"] = want
+        self.sys_tun.set_on(want, "TUN", True)
+        self.ctx.clash.set_tun(want)
 
     def set_clash(self, d: dict):
         self._clash = d
-        ok = d.get("ok")
-        # 只有检测到 Clash Verge 在运行时才显示代理相关的卡片和磁贴（没装的用户看不到无用的面板）
-        for w in (self.card, self.proxy, self.tun):
-            w.setVisible(bool(ok))
-        self.proxy.set_state(bool(d.get("sysproxy")), "127.0.0.1" if d.get("sysproxy") else "已关闭")
-        self.tun.set_state(bool(d.get("tun")), "已开启" if d.get("tun") else "已关闭", bool(ok))
+        ok = bool(d.get("ok"))
+        self._clash_ok = ok
+        # 只有检测到 Clash Verge 在运行时才显示卡片（没装的用户看不到无用的面板）
+        self.card.setVisible(ok and bool(cfg.get("controls.show_clash", True)))
+        self.sys_proxy.set_on(bool(d.get("sysproxy")), "系统代理", bool(ok))
+        self.sys_tun.set_on(bool(d.get("tun")), "TUN", bool(ok))
         if ok:
             self.clash_state.setText("Clash Verge")
             self.speed.setText(f"↑ {fmt_bytes(d.get('up', 0), True)}   ↓ {fmt_bytes(d.get('down', 0), True)}")
@@ -206,6 +464,19 @@ class ControlsPage(Page):
         super().on_show()
         self.ctx.brightness.refresh()
         self.ctx.radio.refresh()
+        hs = getattr(self.ctx, "hotspot", None)
+        if hs is not None:
+            hs.refresh()
+        # 先用缓存立刻铺上（打开这一页不能卡），设备枚举丢后台，回来再更新
+        self.set_audio_devices()
+        self._refresh_audio()
+        if cfg.get("controls.show_mixer", True):
+            self.mixer.set_sessions(self.ctx.audio.audio_sessions())
+            self.ctx.audio.set_session_polling(True)
+
+    def on_hide(self):
+        self.ctx.audio.set_session_polling(False)
+        super().on_hide()
 
 
 # ======================================================================== 窗口切换

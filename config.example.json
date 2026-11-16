@@ -15,7 +15,23 @@
     "pinned": false,
     "compact_view": "clock",
     "auto_cycle_s": 30,
-    "passthrough": false
+    "compact_media_width": 640,
+    "double_click_long_off": true,
+    "sticker_dir": "march7stickers",
+    "passthrough": false,
+    "pages": []
+  },
+  "controls": {
+    "tiles": {
+      "wifi": true,
+      "bt": true,
+      "hotspot": true,
+      "audio": true
+    },
+    "show_volume": true,
+    "show_brightness": true,
+    "show_clash": true,
+    "show_mixer": true
   },
   "hotkeys": {
     "toggle": "Ctrl+Alt+I",
@@ -115,8 +131,14 @@
   "apps": {
     "restore_hotkey": {
       "weixin.exe": "Ctrl+Alt+W",
-      "wechat.exe": "Ctrl+Alt+W"
-    }
+      "wechat.exe": "Ctrl+Alt+W",
+      "qq.exe": ""
+    },
+    "reveal_hidden": [
+      "qq.exe",
+      "weixin.exe",
+      "wechat.exe"
+    ]
   },
   "mail": {
     "interval_s": 120,
@@ -164,6 +186,7 @@
   "clipboard": {
     "max": 10
   },
+  "launcher_enabled": true,
   "launcher": [
     {
       "name": "文件资源管理器",

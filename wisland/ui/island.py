@@ -127,8 +127,8 @@ class _RightClickHook:
                 ly = sg.y() + (info.pt.y - sg.y()) / dpr
                 if isl.isVisible() and isl._inside(QtCore.QPoint(round(lx), round(ly))):
                     if wparam == self.WM_RBUTTONUP:
-                        pos = QtCore.QPoint(round(lx), round(ly))
-                        QtCore.QTimer.singleShot(0, lambda: isl.menu_requested.emit(pos))
+                        # 穿透模式下右键灵动岛直接退出穿透，不再打开设置菜单。
+                        QtCore.QTimer.singleShot(0, lambda: isl.set_passthrough(False))
                     return 1          # 吞掉右键，不传给下面的窗口
             return u.CallNextHookEx(self.handle, code, wparam, lparam)
 
@@ -176,6 +176,8 @@ class _BlankDoubleClick(QtCore.QObject):
         if ev.type() != QtCore.QEvent.Type.MouseButtonDblClick or not isinstance(obj, QtWidgets.QWidget):
             return False
         isl = self.island
+        if not cfg.get("island.double_click_long_off", True):
+            return False
         if obj is isl or obj.window() is not isl or ev.button() != Qt.MouseButton.LeftButton:
             return False
         if self._blank(obj, ev):
@@ -210,6 +212,8 @@ class Island(QtWidgets.QWidget):
     passthrough_changed = QtCore.Signal(bool)
     pin_changed = QtCore.Signal(bool)
     mode_changed = QtCore.Signal(str)
+    capture_visible_changed = QtCore.Signal(bool)
+    fullscreen_visible_changed = QtCore.Signal(bool)
 
     play_pause_requested = QtCore.Signal()      # 收起态音乐视图的播放 / 暂停键
 
@@ -275,12 +279,13 @@ class Island(QtWidgets.QWidget):
         self._dirty = QtCore.QRect()
 
         # ---- 展开内容 ----
-        self.content = QtWidgets.QWidget(self)
-        self.nav = NavBar([(pg.key, pg.glyph, pg.title) for pg in pages], self.content, NAV_H)
-        self.stack = QtWidgets.QStackedWidget(self.content)
-        for pg in pages:
-            self.stack.addWidget(pg)
+        self.all_pages: list = list(pages)          # 全部页面实例（代码顺序）
+        self.pages: list = []                       # 当前显示在导航里的页面（配置顺序）
+        for pg in self.all_pages:
             pg.island = self
+        self.content = QtWidgets.QWidget(self)
+        self.nav = NavBar([], self.content, NAV_H)
+        self.stack = QtWidgets.QStackedWidget(self.content)
         lay = QtWidgets.QVBoxLayout(self.content)
         lay.setSpacing(8)
         self._content_lay = lay
@@ -292,9 +297,8 @@ class Island(QtWidgets.QWidget):
         self.veil = _Veil(self)
         self._opacity: QtWidgets.QGraphicsOpacityEffect | None = None
         default = cfg.get("island.last_tab") or cfg.get("island.default_tab", "home")
-        self._page_key = default if default in self.nav.keys() else self.nav.keys()[0]
-        self.nav.set_current(self._page_key)
-        self.stack.setCurrentIndex(self.nav.keys().index(self._page_key))
+        self._page_key = default
+        self.apply_page_layout(preferred=default)
 
         # ---- 计时器 ----
         self.timer = QtCore.QTimer(self)
@@ -417,6 +421,48 @@ class Island(QtWidgets.QWidget):
             self.expand(page)
             self.locks.add("pin")
 
+    def page(self, key: str):
+        for p in self.all_pages:
+            if p.key == key:
+                return p
+        return None
+
+    def page_keys(self) -> list[str]:
+        return [p.key for p in self.pages]
+
+    def apply_page_layout(self, preferred: str | None = None):
+        """按 config.json → island.pages 重建导航与页面栈（显示哪些页、什么顺序）。
+        隐藏的页面不会留在 QStackedWidget 里，因此也不会跑它的定时器。"""
+        from .pagelayout import page_layout
+        lay = page_layout([p.key for p in self.all_pages])
+        pages = [self.page(it["key"]) for it in lay if it["visible"]]
+        pages = [p for p in pages if p is not None]
+        if not pages:
+            return
+        old = self.stack.currentWidget()
+        if old is not None and old not in pages:
+            old.on_hide()
+        key = preferred or self._page_key
+        if key not in [p.key for p in pages]:
+            key = pages[0].key
+        self.pages = pages
+        while self.stack.count():                 # 摘掉页面对象但不销毁（实例一直留在 all_pages）
+            self.stack.removeWidget(self.stack.widget(0))
+        self.nav.set_items([(p.key, p.glyph, p.title) for p in pages])
+        for p in pages:
+            self.stack.addWidget(p)
+        idx = [p.key for p in pages].index(key)
+        self.stack.setCurrentIndex(idx)
+        self._page_key = key
+        self.nav.set_current(key, force=True)
+        self._place_nav()
+        if self.expanded:
+            self._defer_show(pages[idx])
+            w, h = self.target_size()
+            self.sw.to(w, 440, 0.6)
+            self.sh.to(h, 440, 0.6)
+        self._kick()
+
     def show_page(self, key: str):
         keys = self.nav.keys()
         if key not in keys:
@@ -537,9 +583,10 @@ class Island(QtWidgets.QWidget):
 
     # ================================================================ 每帧
     def _kick(self):
-        if not self.timer.isActive():
+        t = getattr(self, "timer", None)      # 构造早期（还没建 QTimer）时允许调用
+        if t is not None and not t.isActive():
             self._last = time.perf_counter()
-            self.timer.start()
+            t.start()
 
     def _needs_frames(self) -> bool:
         if self.mode != "anchored" or self.drips or self._bd_prev is not None:
@@ -647,8 +694,10 @@ class Island(QtWidgets.QWidget):
             self.timer.stop()
             self.timer.setInterval(16)
         elif self.mode == "anchored" and self.sw.rest and self.sh.rest and not self.expanded:
-            # 只有常态动画：表情 / 音乐律动 / 提醒时 60fps，空闲（只有圆角呼吸）时 30fps
-            self.timer.setInterval(16 if self.compact.busy() else 33)
+            # 静止收起态：音乐、歌词、字幕和贴纸统一约 45fps；普通时钟恢复约 30fps。
+            # 展开、拖动、切换等动画仍由上面的 16ms 分支保持约 60fps。
+            cm = self.compact.mode()
+            self.timer.setInterval(22 if cm in ("media", "subtitle", "activity", "pet") else 33)
         else:
             self.timer.setInterval(16)
 
@@ -1107,6 +1156,10 @@ class Island(QtWidgets.QWidget):
             self.menu_requested.emit(e.globalPosition().toPoint())
 
     def mouseMoveEvent(self, e):
+        # 子控件吞掉释放事件时不能让陈旧的 _press 误触发拖动。
+        if self._press is not None and not (e.buttons() & Qt.MouseButton.LeftButton):
+            self._press = None
+            return
         # 按住并移动即开始拖动（不需要长按）；固定时不允许拖动
         if self._press is not None and (e.position() - self._press).manhattanLength() > 4:
             self.lp_timer.stop()
@@ -1140,6 +1193,9 @@ class Island(QtWidgets.QWidget):
             self.play_pause_requested.emit()       # 快速连点播放键：当作第二次点击，不切换长关
             return
         if e.button() == Qt.MouseButton.LeftButton and self._inside(e.globalPosition().toPoint()):
+            if not cfg.get("island.double_click_long_off", True):
+                e.ignore()
+                return
             self._click_timer.stop()
             self._press = None
             self.toggle_long_off()
@@ -1187,6 +1243,16 @@ class Island(QtWidgets.QWidget):
     def set_capture_visible(self, on: bool):
         cfg.set("island.exclude_from_capture", not on)
         self.apply_capture_mode()
+        self.capture_visible_changed.emit(bool(on))
+
+    def fullscreen_visible(self) -> bool:
+        return not bool(cfg.get("island.hide_fullscreen", False))
+
+    def set_fullscreen_visible(self, on: bool):
+        cfg.set("island.hide_fullscreen", not bool(on))
+        if on:
+            self.set_fullscreen_hidden(False)
+        self.fullscreen_visible_changed.emit(bool(on))
 
     def apply_capture_mode(self):
         """参与屏幕捕获：截图 / 录屏里能看到灵动岛；毛玻璃取背景时只在那一瞬间临时排除自己。

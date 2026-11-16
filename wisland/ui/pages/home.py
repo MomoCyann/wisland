@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -10,6 +11,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 from ...core.bg import launch
 from ...core.config import cfg, expand
 from ..anim import Spring, clamp
+from ..stickers import load_sticker, sticker_paths
 from ..theme import KIND_COLORS, G, W, icon_font, theme, ui_font
 from ..widgets import (Card, Hoverable, IconButton, Label, PillButton, ScrollArea, Themed, fmt_time, hbox,
                        painter, rounded_pixmap, vbox)
@@ -105,8 +107,9 @@ class CoverView(QtWidgets.QWidget):
 
 
 class CoverTitle(QtWidgets.QWidget):
-    """封面在上方居中（正对播放键），标题压在封面下沿、向两侧延伸，但不超出播放卡片。"""
-    COVER = 58
+    """封面在上方居中；歌名和歌手在封面下方独立排布，互不重叠。"""
+    clicked = QtCore.Signal()
+    COVER = 87       # 原 58px 的 1.5 倍
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -115,8 +118,10 @@ class CoverTitle(QtWidgets.QWidget):
         self.h = 0.0
         self.title = "未在播放"
         self.sub = ""
-        self.setFixedHeight(self.COVER + 30)
+        self.setFixedHeight(self.COVER + 48)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("点击唤出网易云音乐")
         theme.changed.connect(self.update)
 
     def set_pixmap(self, pm, glow):
@@ -128,13 +133,24 @@ class CoverTitle(QtWidgets.QWidget):
         self.title, self.sub = title, sub
         self.update()
 
-    def paintEvent(self, e):
-        p = painter(self)
-        W_ = self.width()
+    def _cover_rect(self) -> QtCore.QRectF:
         s = 1.0 + 0.07 * self.h
         size = self.COVER * s
         cr = QtCore.QRectF(0, 0, size, size)
-        cr.moveCenter(QtCore.QPointF(W_ / 2, 4 + self.COVER / 2 - 2.5 * self.h))
+        cr.moveCenter(QtCore.QPointF(self.width() / 2, 4 + self.COVER / 2 - 2.5 * self.h))
+        return cr
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self._cover_rect().contains(e.position()):
+            self.clicked.emit()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, e):
+        p = painter(self)
+        W_ = self.width()
+        cr = self._cover_rect()
         if self.h > 0.01 and self.glow.alpha():
             g = QtGui.QRadialGradient(cr.center() + QtCore.QPointF(0, 6), cr.width() * 0.8)
             c1 = QtGui.QColor(self.glow)
@@ -148,21 +164,24 @@ class CoverTitle(QtWidgets.QWidget):
             p.drawEllipse(cr.adjusted(-10, -6, 10, 14))
         if self.pm is not None:
             p.drawPixmap(cr.toRect(), self.pm)
-        # 标题：压住封面下沿，左右延伸（限制在卡片内），底下垫一块半透明玻璃保证可读
-        f = ui_font(13.5, W.DemiBold)
-        fm = QtGui.QFontMetrics(f)
-        text = self.title + (f"  ·  {self.sub}" if self.sub else "")
-        maxw = W_ - 16
-        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, int(maxw - 20))
-        tw = fm.horizontalAdvance(text) + 20
-        tr = QtCore.QRectF((W_ - tw) / 2, cr.bottom() - 12, tw, fm.height() + 8)
-        p.setFont(f)
-        sh = QtGui.QColor(0, 0, 0, 120) if theme.dark else QtGui.QColor(255, 255, 255, 170)
-        p.setPen(sh)
-        for dx, dy in ((0, 1), (1, 0), (-1, 0), (0, -1)):
-            p.drawText(tr.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, text)
+        # 两行信息完全放在封面下方：第一行歌名，第二行歌手。
+        title_font = ui_font(12.5, W.DemiBold)
+        artist_font = ui_font(10.5, W.Medium)
+        title_fm = QtGui.QFontMetrics(title_font)
+        artist_fm = QtGui.QFontMetrics(artist_font)
+        maxw = W_ - 20
+        title = title_fm.elidedText(self.title, Qt.TextElideMode.ElideRight, int(maxw))
+        artist = artist_fm.elidedText(self.sub, Qt.TextElideMode.ElideRight, int(maxw)) if self.sub else ""
+        text_top = 4 + self.COVER + 5
+        title_r = QtCore.QRectF(10, text_top, maxw, 20)
+        artist_r = QtCore.QRectF(10, text_top + 21, maxw, 17)
+        p.setFont(title_font)
         p.setPen(theme.text())
-        p.drawText(tr, Qt.AlignmentFlag.AlignCenter, text)
+        p.drawText(title_r, Qt.AlignmentFlag.AlignCenter, title)
+        if artist:
+            p.setFont(artist_font)
+            p.setPen(theme.text2())
+            p.drawText(artist_r, Qt.AlignmentFlag.AlignCenter, artist)
 
 
 class MediaCard(Card):
@@ -178,20 +197,23 @@ class MediaCard(Card):
         self.artist = Label("", 12.5, level=2)
         self.app = Label("", 11, level=3)
         self.prog = Progress()
+        self.like = IconButton(G.HEART, 34, 15, "喜欢 / 取消喜欢（网易云）")
         self.prev = IconButton(G.PREV, 34, 15, "上一首")
         self.play = IconButton(G.PLAY, 40, 18, "播放 / 暂停", filled=True)
         self.next = IconButton(G.NEXT, 34, 15, "下一首")
         self.open_btn = PillButton("打开网易云", G.MUSIC, height=28)
+        self.like.clicked.connect(lambda: ctx.media.like())
         self.prev.clicked.connect(lambda: ctx.media.prev())
         self.next.clicked.connect(lambda: ctx.media.next())
         self.play.clicked.connect(lambda: ctx.media.play_pause())
         self.prog.seek.connect(lambda s: ctx.media.seek(s))
+        self.cover.clicked.connect(self._open_player)
         self.open_btn.clicked.connect(self._open_player)
         self.open_btn.hide()
         self.title.hide()
         self.artist.hide()
         self.app.hide()
-        ctrls = hbox(None, self.prev, self.play, self.next, None, spacing=8)   # 播放键正对封面
+        ctrls = hbox(None, self.like, self.prev, self.play, self.next, None, spacing=6)   # 播放键正对封面
         self.setLayout(vbox(self.cover, self.prog, ctrls, None, spacing=0, margins=(10, 6, 10, 6)))
         self._tick = QtCore.QTimer(self, interval=500, timeout=self.prog.update)
         self._set_cover(None)
@@ -221,13 +243,28 @@ class MediaCard(Card):
         return
 
     def _open_player(self):
-        items = cfg.get("launcher") or []
-        it = next((i for i in items if "cloudmusic" in str(i.get("path", "")).lower()), items[0] if items else None)
-        if it:
-            self.ctx.windows.open_or_focus(expand(it["path"]), it.get("exe"))
+        """点击专辑封面时优先唤出已运行的网易云，否则从安装路径启动。"""
+        hints = ("网易云音乐", "NetEase CloudMusic", "CloudMusic")
+        result = "failed"
+        if self.ctx.windows.reveal("cloudmusic.exe", hints, allow_hidden=True):
+            result = "focused"
+        else:
+            items = cfg.get("launcher") or []
+            it = next((i for i in items if "cloudmusic" in str(i.get("path", "")).lower()), None)
+            if it:
+                result = self.ctx.windows.open_or_focus(expand(it.get("path") or "cloudmusic.exe"),
+                                                        it.get("exe") or "cloudmusic.exe", it.get("args"))
+            else:
+                from ...services.system import resolve_app_path
+                path = resolve_app_path("cloudmusic.exe") or "cloudmusic.exe"
+                result = self.ctx.windows.open_or_focus(path, "cloudmusic.exe")
+        if result in ("focused", "launched") and getattr(self.ctx, "island", None):
+            self.ctx.island.collapse()
 
     def _set_cover(self, img):
-        px = rounded_pixmap(img, 58, 13) if img is not None else None
+        cover_size = CoverTitle.COVER
+        cover_radius = round(cover_size * 13 / 58)
+        px = rounded_pixmap(img, cover_size, cover_radius) if img is not None else None
         glow = None
         if img is not None:
             q = img if isinstance(img, QtGui.QImage) else img.toImage()
@@ -235,14 +272,15 @@ class MediaCard(Card):
             h, s_, v, _ = glow.getHsv()
             glow = QtGui.QColor.fromHsv(max(0, h), min(255, int(s_ * 1.4) + 40), max(170, v))
         if px is None:
-            pm = QtGui.QPixmap(116, 116)
+            physical = cover_size * 2
+            pm = QtGui.QPixmap(physical, physical)
             pm.fill(Qt.GlobalColor.transparent)
             p = QtGui.QPainter(pm)
             p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme.card(1.6))
-            p.drawRoundedRect(QtCore.QRectF(0, 0, 116, 116), 26, 26)
-            p.setFont(icon_font(44))
+            p.drawRoundedRect(QtCore.QRectF(0, 0, physical, physical), cover_radius * 2, cover_radius * 2)
+            p.setFont(icon_font(66))
             p.setPen(theme.text(0.6))
             p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, G.MUSIC)
             p.end()
@@ -257,6 +295,11 @@ class MediaCard(Card):
         has = bool(m.get("has_session") and m.get("title"))
         self.cover.set_text(m.get("title") or "未在播放", m.get("artist") or "")
         self.play.set_glyph(G.PAUSE if m.get("playing") else G.PLAY)
+        liked = m.get("liked") is True
+        self.like.set_glyph(G.HEART_FILL if liked else G.HEART)
+        self.like.color = QtGui.QColor("#EC4141") if liked else None
+        self.like.setToolTip("已喜欢，点击取消喜欢" if liked else "喜欢当前歌曲（网易云）")
+        self.like.update()
         self.prog.set_state(m)
         self.prog.setVisible(True)
         self.prog.setEnabled(has and (m.get("duration") or 0) > 0)
@@ -395,30 +438,115 @@ class LaunchIcon(Hoverable):
 
 
 class PetWidget(QtWidgets.QWidget):
-    """主页中间的大号小形象：眼睛跟随光标，鼠标靠近时开心。"""
+    """主页中间随机显示三月七贴纸；定时和点击都会切换。"""
     def __init__(self, parent=None, scale: float = 2.3):
         super().__init__(parent)
-        from ..compact import PetFace
-        self.face = PetFace()
-        self.scale = scale
-        self.setMinimumWidth(round(64 * scale))
-        self._t = QtCore.QTimer(self, interval=16, timeout=self.update)
-        self._t.setTimerType(Qt.TimerType.PreciseTimer)
-        theme.changed.connect(self.update)
+        self.paths = sticker_paths()
+        self.cache: dict[str, QtGui.QPixmap] = {}
+        self.current = -1
+        self.pm: QtGui.QPixmap | None = None
+        self.setMinimumWidth(round(82 * scale))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._t = QtCore.QTimer(self, singleShot=True, timeout=self._pick)
+        self._motion = QtCore.QTimer(self, interval=16, timeout=self._motion_tick)
+        self._motion.setTimerType(Qt.TimerType.PreciseTimer)
+        self._dx = Spring(0, 180, 0.72, 0.01)
+        self._dy = Spring(0, 180, 0.72, 0.01)
+        self._rot = Spring(0, 150, 0.78, 0.01)
+        self._pick()
+
+    def _load(self, path) -> QtGui.QPixmap | None:
+        key = str(path)
+        if key in self.cache:
+            return self.cache[key]
+        pm = load_sticker(path, 300)
+        if pm is None:
+            return None
+        if len(self.cache) >= 8:
+            self.cache.pop(next(iter(self.cache)))
+        self.cache[key] = pm
+        return pm
+
+    def reload_stickers(self):
+        self.paths = sticker_paths()
+        self.cache.clear()
+        self.current = -1
+        self._pick()
+
+    def react(self, _kind: str = "surprise"):
+        self._pick()
+
+    def _pick(self):
+        latest = sticker_paths()
+        if latest != self.paths:
+            self.paths = latest
+            self.cache.clear()
+            self.current = -1
+        if not self.paths:
+            self.pm = None
+            self.update()
+            return
+        choices = [i for i in range(len(self.paths)) if i != self.current]
+        self.current = random.choice(choices or [0])
+        self.pm = self._load(self.paths[self.current])
+        self.update()
+        if self.isVisible():
+            self._t.start(random.randint(7000, 13000))
+
+    def _motion_tick(self):
+        c = QtCore.QPointF(self.rect().center())
+        pos = QtCore.QPointF(self.mapFromGlobal(QtGui.QCursor.pos()))
+        nx = clamp((pos.x() - c.x()) / max(1.0, self.width() / 2), -1.0, 1.0)
+        ny = clamp((pos.y() - c.y()) / max(1.0, self.height() / 2), -1.0, 1.0)
+        self._dx.to(nx * 9.0)
+        self._dy.to(ny * 6.0)
+        self._rot.to(nx * 2.4)
+        self._dx.step(0.016)
+        self._dy.step(0.016)
+        self._rot.step(0.016)
+        self.update()
 
     def showEvent(self, e):
-        self._t.start()
+        super().showEvent(e)
+        if not self._t.isActive():
+            self._t.start(random.randint(7000, 13000))
+        self._motion.start()
 
     def hideEvent(self, e):
         self._t.stop()
+        self._motion.stop()
+        super().hideEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._pressed = True
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            pressed = getattr(self, "_pressed", False)
+            self._pressed = False
+            if pressed and self.rect().contains(e.position().toPoint()):
+                self._pick()
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
 
     def paintEvent(self, e):
+        if self.pm is None:
+            return
         p = painter(self)
-        c = QtCore.QRectF(self.rect()).center()
-        gc = QtCore.QPointF(self.mapToGlobal(c.toPoint()))
-        look = QtCore.QPointF(QtGui.QCursor.pos()) - gc
-        near = self.rect().adjusted(-24, -24, 24, 24).contains(self.mapFromGlobal(QtGui.QCursor.pos()))
-        self.face.paint(p, c.x(), c.y() - 4, self.scale, 1.0, look, near)
+        target = QtCore.QRectF(self.rect()).adjusted(2, 2, -2, -2)
+        size = self.pm.size()
+        size.scale(target.size().toSize(), Qt.AspectRatioMode.KeepAspectRatio)
+        r = QtCore.QRectF(0, 0, size.width(), size.height())
+        r.moveCenter(target.center() + QtCore.QPointF(self._dx.x, self._dy.x))
+        p.translate(r.center())
+        p.rotate(self._rot.x)
+        p.translate(-r.center())
+        p.drawPixmap(r.toRect(), self.pm)
 
 
 class LaunchStrip(QtWidgets.QScrollArea):
@@ -461,19 +589,16 @@ class LaunchStrip(QtWidgets.QScrollArea):
 
 
 class HomePage(Page):
-    key, glyph, title, height = "home", G.HOME, "主页", 240
+    key, glyph, title, height = "home", G.HOME, "主页", 264
 
     def __init__(self, ctx):
         super().__init__(ctx)
         self.media = MediaCard(ctx)
-        self.media.setFixedHeight(156)
+        self.media.setFixedHeight(210)
         self.a_pin = Action(G.UNPIN, "保持展开")
         self.a_pt = Action(G.POINTER, "可穿透")
-        self.a_mute = Action(G.VOLUME, "静音")
-        self.a_live = Action(G.LIVE, "实时字幕")
-        self.a_mute.clicked.connect(lambda: ctx.audio.toggle_mute())
-        self.a_live.clicked.connect(self._toggle_live)
-        ctx.live.running_changed.connect(lambda on: self.a_live.set_on(on, None, "聆听中" if on else "实时字幕"))
+        self.a_mute = Action(G.IMAGE, "参与截图")
+        self.a_live = Action(G.MONITOR, "全屏显示")
         grid = QtWidgets.QGridLayout()
         grid.setSpacing(8)
         grid.addWidget(self.a_pin, 0, 0)
@@ -497,23 +622,25 @@ class HomePage(Page):
             it = self.launch_row.takeAt(0)
             if it.widget():
                 it.widget().deleteLater()
-        for item in cfg.get("launcher") or []:
-            self.launch_row.addWidget(LaunchIcon(item, self._open))
-        self.launch_row.addStretch(1)
+        enabled = bool(cfg.get("launcher_enabled", True))
+        self.strip.setVisible(enabled)
+        # 210px 主区 + 8px 间距 + 46px 快速应用栏；不再额外保留空白。
+        self.set_height(264 if enabled else 210)
+        if enabled:
+            for item in cfg.get("launcher") or []:
+                self.launch_row.addWidget(LaunchIcon(item, self._open))
+            self.launch_row.addStretch(1)
 
     def _open(self, path, exe=None, args=None):
         res = self.ctx.windows.open_or_focus(path, exe, args)
         if res == "focused" and self.island:
             self.island.collapse()
 
-    def _toggle_live(self):
-        self.ctx.live.toggle()
-        if self.ctx.live.running and self.island:
-            self.ctx.pages["trans"].show_live()
-            self.island.show_page("trans")
+    def set_capture_visible(self, on: bool):
+        self.a_mute.set_on(on, G.IMAGE, "参与截图" if on else "不参与截图")
 
-    def set_muted(self, muted: bool):
-        self.a_mute.set_on(muted, G.MUTE if muted else G.VOLUME, "已静音" if muted else "静音")
+    def set_fullscreen_visible(self, on: bool):
+        self.a_live.set_on(on, G.MONITOR, "全屏显示" if on else "全屏隐藏")
 
 
 def cfg_path():
@@ -617,15 +744,16 @@ class MessagesPage(Page):
         for k, t in self.tiles.items():
             t.clicked.connect(lambda k=k: self._open(k))
         self.hist = HistoryList()
-        sc = ScrollArea()
-        lay = QtWidgets.QVBoxLayout(sc.inner)
+        self.sc = ScrollArea()
+        lay = QtWidgets.QVBoxLayout(self.sc.inner)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.hist)
         lay.addStretch(1)
         clear = PillButton("全部已读", G.CHECK, height=26)
         clear.clicked.connect(self._clear_all)
-        head = hbox(None, clear)
-        self.setLayout(vbox(hbox(*self.tiles.values(), spacing=8), head, (sc, 1), spacing=8))
+        self.head = QtWidgets.QWidget()
+        self.head.setLayout(hbox(None, clear))
+        self.setLayout(vbox(hbox(*self.tiles.values(), spacing=8), self.head, (self.sc, 1), spacing=8))
 
     def _open(self, kind):
         self.ctx.notify.open(kind)
@@ -643,6 +771,10 @@ class MessagesPage(Page):
             last = next((h for h in hist if h.get("kind") == k), None)
             t.set_count(counts.get(k, 0), time.strftime("%H:%M", time.localtime(last["time"])) if last else "")
         self.hist.set_rows(hist)
+        has_hist = bool(hist)
+        self.head.setVisible(has_hist)
+        self.sc.setVisible(has_hist)
+        self.set_height(84 if not has_hist else min(270, 126 + min(len(hist), 5) * 30))
 
     def on_show(self):
         super().on_show()

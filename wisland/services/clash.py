@@ -169,10 +169,31 @@ def write_sysproxy(enable: bool, port: int):
     wininet.InternetSetOptionW(None, 37, None, 0)  # INTERNET_OPTION_REFRESH
 
 
+def write_verge_flag(key: str, enable: bool) -> bool:
+    """同步 Clash Verge 自己的 verge.yaml，让它的界面状态和实际开关一致。"""
+    d = expand(cfg.get("clash.config_dir") or "")
+    path = os.path.join(d, "verge.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        line = f"{key}: {'true' if enable else 'false'}"
+        import re
+        pat = re.compile(rf"(?m)^{re.escape(key)}\s*:\s*.*$")
+        text = pat.sub(line, text, count=1) if pat.search(text) else text.rstrip() + "\n" + line + "\n"
+        tmp = path + ".wisland.tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
 # ---------------- service ----------------
 
 class ClashService(QtCore.QObject):
     updated = QtCore.Signal(dict)
+    notice = QtCore.Signal(str)          # 需要告诉用户的一句话（找不到应用等）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -371,8 +392,28 @@ class ClashService(QtCore.QObject):
         self._wake.set()
 
     # ---------- controls ----------
+    def _trigger_verge_hotkey(self, action: str) -> bool:
+        """使用 Clash Verge 自己注册的全局快捷键，让后端、托盘和前端状态同时更新。"""
+        path = os.path.join(expand(cfg.get("clash.config_dir") or ""), "verge.yaml")
+        try:
+            import yaml
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            for item in data.get("hotkeys") or []:
+                name, sep, spec = str(item).partition(",")
+                if sep and name.strip() == action and spec.strip():
+                    from .system import send_hotkey
+                    if send_hotkey(spec.strip()):
+                        QtCore.QTimer.singleShot(450, self._after_change)
+                        return True
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
     def set_mode(self, mode: str):
         if mode not in ("rule", "global", "direct"):
+            return
+        if self._trigger_verge_hotkey(f"clash_mode_{mode}"):
             return
         run_bg(self._request, "PATCH", "/configs", {"mode": mode}, on_done=self._after_change)
 
@@ -381,7 +422,17 @@ class ClashService(QtCore.QObject):
                on_done=self._after_change)
 
     def set_tun(self, enable: bool):
-        run_bg(self._request, "PATCH", "/configs", {"tun": {"enable": bool(enable)}}, on_done=self._after_change)
+        if bool(self.last.get("tun")) != bool(enable) and self._trigger_verge_hotkey("toggle_tun_mode"):
+            return
+        def work():
+            res = self._request("PATCH", "/configs", {"tun": {"enable": bool(enable)}})
+            write_verge_flag("enable_tun_mode", bool(enable))
+            return res
+
+        def fail(e):
+            self.notice.emit(f"TUN 切换失败：{str(e)[:80]}")
+            self._after_change()
+        run_bg(work, on_done=self._after_change, on_error=fail)
 
     def test_delay(self, name: str, cb: Callable[[int | None], None]):
         """测速 -> cb(ms 或 None)（主线程回调）。"""
@@ -396,11 +447,53 @@ class ClashService(QtCore.QObject):
         run_bg(work, on_done=lambda ms: (cb(ms), self._after_change()), on_error=lambda e: cb(None))
 
     def set_sysproxy(self, enable: bool):
+        if bool(self.last.get("sysproxy")) != bool(enable) and self._trigger_verge_hotkey("toggle_system_proxy"):
+            return
+        port = int(cfg.get("clash.proxy_port") or 7897)
+
         def work():
-            write_sysproxy(enable, int(cfg.get("clash.proxy_port") or 7897))
-        run_bg(work, on_done=self._after_change)
+            write_sysproxy(enable, port)
+            ok = read_sysproxy()[0] == bool(enable)
+            if ok:
+                write_verge_flag("enable_system_proxy", bool(enable))
+            return ok
+
+        def done(ok):
+            if not ok:
+                self.notice.emit("系统代理没写进去：可能被安全软件拦了")
+            self._after_change()
+
+        def fail(e):
+            self.notice.emit(f"系统代理切换失败：{str(e)[:80]}")
+            self._after_change()
+
+        run_bg(work, on_done=done, on_error=fail)
 
     def open_app(self):
-        p = expand(cfg.get("clash.app") or "")
-        if p:
-            launch(p)
+        """打开 / 唤出 Clash Verge 主窗口。
+
+        Clash Verge（Tauri）自己维护窗口的显示状态：用 Win32 ShowWindow 强行把它显示出来之后，
+        它界面上的关闭按钮会失灵（它以为窗口还藏着，于是点 X 什么都不做）。
+        所以这里优先"再启动一次 exe"，由它的单实例回调把主窗口显示出来；
+        1.6 秒还没出来，才退回 Win32 强行显示。"""
+        from .system import resolve_app_path
+
+        target = expand(cfg.get("clash.app") or "") or "clash-verge.exe"
+        path = target if os.path.isfile(target) else (resolve_app_path(target) or target)
+        if not os.path.isfile(path):
+            self.notice.emit("找不到 Clash Verge，请在设置的「Clash」里填写安装路径")
+            return
+        launch(path)                       # 没在跑 = 启动；已在跑 = 走它的单实例唤出
+        QtCore.QTimer.singleShot(1600, lambda: self._force_show())
+
+    def _force_show(self):
+        """单实例唤出没成功时的兜底：直接把它被藏起来的窗口显示出来。"""
+        from .system import WindowService
+
+        ws = WindowService()
+        if ws.find_app_window("clash-verge.exe"):
+            return
+        h = ws.find_tray_window("clash-verge.exe", ("clash verge",))
+        if h:
+            ws.activate(h)
+            self.notice.emit("Clash Verge 没响应唤出，已直接显示窗口（之后它自己的 X 可能失效，重开一次即可）")

@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 
 from PySide6 import QtCore, QtGui
 
+from ..core.config import cfg
 from .anim import clamp, ease_out
+from .stickers import load_sticker, sticker_paths
 from .theme import KIND_COLORS, G, W, icon_font, theme, ui_font
 from .widgets import rounded_pixmap
 
@@ -292,7 +295,13 @@ class CompactView:
         self._view_t = -10.0
         self.look = QtCore.QPointF(0, 0)      # 光标相对胶囊中心的位置（形象的眼睛会看过去）
         self.near = False                      # 光标在附近（形象开心）
-        self.pet = PetFace()
+        self.pet = PetFace()  # 保留兼容；紧凑态实际绘制用户贴纸
+        self._sticker_paths = []
+        self._sticker_cache: dict[str, QtGui.QPixmap] = {}
+        self._sticker_idx = -1
+        self._sticker_pm: QtGui.QPixmap | None = None
+        self._sticker_next = 0.0
+        self.reload_stickers()
         self._bars = [0.0] * 4
         self._peak = 0.0
         # 歌词（由 app 设置：services.lyrics.Lyrics 或 None）
@@ -308,8 +317,43 @@ class CompactView:
         self.sub_zh = ""
         self.sub_t = -100.0
         # 收起态音乐视图右侧的播放 / 暂停键（灵动岛坐标，绘制时更新）
+        self.like_rect: QtCore.QRectF | None = None
+        self.prev_rect: QtCore.QRectF | None = None
         self.play_rect: QtCore.QRectF | None = None
+        self.next_rect: QtCore.QRectF | None = None
+        self.like_hover = 0.0
+        self.prev_hover = 0.0
         self.play_hover = 0.0
+        self.next_hover = 0.0
+
+    def reload_stickers(self):
+        self._sticker_paths = sticker_paths()
+        self._sticker_cache.clear()
+        self._sticker_idx = -1
+        self.react_sticker()
+
+    def react_sticker(self):
+        latest = sticker_paths()
+        if latest != self._sticker_paths:
+            self._sticker_paths = latest
+            self._sticker_cache.clear()
+            self._sticker_idx = -1
+        if not self._sticker_paths:
+            self._sticker_pm = None
+            return
+        choices = [i for i in range(len(self._sticker_paths)) if i != self._sticker_idx]
+        self._sticker_idx = random.choice(choices or [0])
+        path = self._sticker_paths[self._sticker_idx]
+        key = str(path)
+        pm = self._sticker_cache.get(key)
+        if pm is None:
+            pm = load_sticker(path, 160)
+            if pm is not None:
+                if len(self._sticker_cache) >= 12:
+                    self._sticker_cache.pop(next(iter(self._sticker_cache)))
+                self._sticker_cache[key] = pm
+        self._sticker_pm = pm
+        self._sticker_next = time.monotonic() + random.uniform(7.0, 13.0)
 
     # --- 数据 ---
     def set_media(self, m: dict):
@@ -420,9 +464,10 @@ class CompactView:
         if m == "media":
             if not self.playing() and not self.media.get("title"):
                 return 190 + nb * 12, H_MEDIA
-            return max(300, self._lyr_w) + 34 + nb * 12, H_MEDIA
+            # 音乐收起态总宽度固定可调；超出可用区域的歌名/歌词由绘制逻辑横向滚动。
+            return clamp(float(cfg.get("island.compact_media_width", 640) or 640), 360, 760) + nb * 12, H_MEDIA
         if m == "pet":
-            return 150 + nb * 14, H_IDLE
+            return 150 + nb * 14, 60
         w = 150 + (64 if self.weather else 0) + nb * 14
         return w, H_IDLE
 
@@ -437,7 +482,7 @@ class CompactView:
         p.save()
         p.setClipRect(r.adjusted(6, 0, -6, 0), Qt.ClipOperation.IntersectClip)
         if m != "media":
-            self.play_rect = None
+            self.like_rect = self.prev_rect = self.play_rect = self.next_rect = None
         if m == "activity":
             self._paint_activity(p, r, a)
         elif m == "subtitle":
@@ -518,20 +563,28 @@ class CompactView:
         sx, sy = getattr(self, "squash", (1.0, 1.0))
         amount, rel = getattr(self, "press", (0.0, 0.0))
         amount = clamp(amount, 0.0, 1.2)
-        side_w = abs(rel)                     # 0 = 按在中间，1 = 按在一端
-        lean = -rel * min(1.0, amount * 1.6)   # 向没被按的一侧倾斜
-        self.pet.spread = amount * (1 - side_w) * 9.0
-        self.pet.tilt = amount * (1 - side_w) * 14.0
+        lean = -rel * min(1.0, amount * 1.6)
+        if time.monotonic() >= self._sticker_next:
+            self.react_sticker()
         p.save()
         p.translate(cx, cy)
-        p.translate(lean * 24.0, 0)            # 明显地偏向没被按的一侧
-        p.rotate(lean * 18.0)
-        p.scale(sx, sy)                       # 灵动岛被按压时表情一起被压扁
+        p.translate(lean * 18.0 + clamp(self.look.x() / 55.0, -4, 4),
+                    clamp(self.look.y() / 70.0, -3, 3))
+        p.rotate(lean * 14.0 + clamp(self.look.x() / 180.0, -2.0, 2.0))
+        p.scale(sx, sy)
         p.translate(-cx, -cy)
-        self.pet.paint(p, cx, cy - 1, 1.0, a, self.look, self.near)
+        if self._sticker_pm is not None:
+            size = self._sticker_pm.size()
+            size.scale(QtCore.QSize(86, 56), Qt.AspectRatioMode.KeepAspectRatio)
+            ir = QtCore.QRectF(0, 0, size.width(), size.height())
+            ir.moveCenter(QtCore.QPointF(cx, cy))
+            p.setOpacity(a)
+            p.drawPixmap(ir.toRect(), self._sticker_pm)
+            p.setOpacity(1.0)
+        else:
+            self.pet.paint(p, cx, cy - 1, 1.0, a, self.look, self.near)
         p.restore()
-        x = r.right() - 14
-        self._badges(p, x, cy, a)
+        self._badges(p, r.right() - 14, cy, a)
 
     def _badges(self, p, right: float, cy: float, a: float) -> float:
         x = right
@@ -551,7 +604,8 @@ class CompactView:
         p.setFont(ui_font(15, W.DemiBold, num=True))
         p.setPen(theme.text(a))
         txt = time.strftime("%H:%M", now)
-        p.drawText(QtCore.QRectF(r.x() + 18, r.y(), 80, r.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+        # 时间始终以灵动岛本体为基准居中；天气和消息标记仍靠右显示。
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, txt)
         x = r.right() - 16
         x = self._badges(p, x, cy, a) - 4
         if self.weather:

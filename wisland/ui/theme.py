@@ -29,6 +29,8 @@ class G:
     MUTE = "\uE74F"
     WIFI = "\uE701"
     BT = "\uE702"
+    HOTSPOT = "\uE704"    # 信号塔：移动热点
+    HEADPHONE = "\uE7F6"  # 耳机：声音输出设备
     GLOBE = "\uE774"
     SNIP = "\uE924"
     PLAY = "\uE768"
@@ -50,6 +52,8 @@ class G:
     BELL = "\uEA8F"
     CHAT = "\uE8F2"
     MUSIC = "\uE8D6"
+    HEART = "\uEB51"
+    HEART_FILL = "\uEB52"
     MONITOR = "\uE7F4"
     TRASH = "\uE74D"
     UP = "\uE74A"

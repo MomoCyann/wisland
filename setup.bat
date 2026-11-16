@@ -70,6 +70,10 @@ if errorlevel 1 (
     goto :fail
 )
 
+rem create a windowless interpreter with a friendly Task Manager process name
+"%VPY%" -c "import os,shutil,sys; src=os.path.join(os.path.dirname(sys._base_executable),'pythonw.exe'); shutil.copy2(src,os.path.join(sys.prefix,'Scripts','Wisland.exe'))"
+if errorlevel 1 goto :fail
+
 echo.
 echo  Done! Double-click "wisland.vbs" to start wisland.
 echo  Live Japanese subtitles download their models (about 630 MB) the first time you use them.

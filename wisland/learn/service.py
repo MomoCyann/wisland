@@ -91,14 +91,7 @@ class LearnService(QtCore.QObject):
         self._syncing = False
         self._tok_cache: dict[str, list] = {}
         self._timer = QtCore.QTimer(self, interval=20000, timeout=self.auto_sync)
-        # 分词器 / 词典首次加载较慢：后台预热
-        run_bg(self._warm)
-
-    @staticmethod
-    def _warm():
-        from . import dictionary, tokenizer
-        tokenizer.tokenize("こんにちは")
-        dictionary.get()
+        # fugashi/unidic 词典会映射数百 MB 数据；改为用户实际查词时再按需加载。
 
     def start(self):
         from . import wordbook

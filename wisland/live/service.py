@@ -57,9 +57,8 @@ class LiveService(QtCore.QObject):
         self.pipe = None
         self.running = False
         self._dl = None
-        # numpy / sherpa-onnx 导入要 0.5s 以上：启动后在后台预先导入，点「开始聆听」时不卡界面
-        from ..core.bg import run_bg
-        run_bg(lambda: __import__("wisland.live.pipeline"))
+        # 重型识别依赖（numpy / sherpa-onnx）只在用户真正开始聆听时加载，
+        # 避免常驻后台时白白占用数百 MB 内存和额外工作线程。
 
     def available(self) -> tuple[bool, str]:
         from .paths import MODELS

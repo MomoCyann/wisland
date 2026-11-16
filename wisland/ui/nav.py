@@ -40,7 +40,8 @@ class NavBar(QtWidgets.QWidget):
         self.w = [Spring(ICON_W, 260, 0.56, 0.05) for _ in items]
         self.hover = [Spring(0, 400, 1.0, 0.01) for _ in items]
         self.badges: dict[str, int] = {}
-        self.w[0].snap(self.full_w[0])
+        if self.w:                               # 允许先建空的，稍后 set_items 填内容
+            self.w[0].snap(self.full_w[0])
         self._hover_i = -1
         self._press_pos: QtCore.QPoint | None = None
         self._lp = QtCore.QTimer(self, singleShot=True, interval=LONG_PRESS_MS, timeout=self._long_press)
@@ -73,12 +74,27 @@ class NavBar(QtWidgets.QWidget):
     def keys(self) -> list[str]:
         return [k for k, _, _ in self.items]
 
-    def set_current(self, key: str, emit: bool = False):
+    def set_items(self, items: list[tuple[str, str, str]]):
+        """页面显示 / 隐藏、调顺序后重建标签（宽度与悬停弹簧一起重来）。"""
+        self.items = list(items)
+        fm = QtGui.QFontMetrics(self.font_)
+        self.full_w = [ICON_W + fm.horizontalAdvance(lbl) + 46 for _, _, lbl in self.items]
+        self.w = [Spring(ICON_W, 260, 0.56, 0.05) for _ in self.items]
+        self.hover = [Spring(0, 400, 1.0, 0.01) for _ in self.items]
+        self.index = 0
+        self._hover_i = -1
+        self.badges = {k: v for k, v in self.badges.items() if k in self.keys()}
+        if self.w:
+            self.w[0].snap(self.full_w[0])       # 第一个标签默认展开（由 Island 随后纠正）
+        self._place_right()
+        self.update()
+
+    def set_current(self, key: str, emit: bool = False, force: bool = False):
         keys = self.keys()
         if key not in keys:
             return
         i = keys.index(key)
-        if i == self.index:
+        if i == self.index and not force:
             return
         self.index = i
         for j, s in enumerate(self.w):
@@ -194,6 +210,8 @@ class NavBar(QtWidgets.QWidget):
 
     # --- 绘制 ---
     def paintEvent(self, e):
+        if not self.items:
+            return
         p = painter(self)
         rects = self._rects()
         # 当前项底块：半透明白色圆角

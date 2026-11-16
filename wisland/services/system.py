@@ -198,6 +198,7 @@ _shell32 = ctypes.windll.shell32
 GWL_STYLE, GWL_EXSTYLE = -16, -20
 WS_VISIBLE = 0x10000000
 WS_MAXIMIZE, WS_CAPTION = 0x01000000, 0x00C00000
+WS_THICKFRAME = 0x00040000
 WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE = 0x80, 0x40000, 0x08000000
 GW_OWNER = 4
 DWMWA_CLOAKED = 14
@@ -206,13 +207,24 @@ ICON_SMALL, ICON_BIG, ICON_SMALL2 = 0, 1, 2
 GCLP_HICON, GCLP_HICONSM = -14, -34
 SMTO_ABORTIFHUNG = 0x0002
 SW_RESTORE, SW_SHOW = 9, 5
+SWP_NOZORDER, SWP_NOACTIVATE, SWP_SHOWWINDOW = 0x0004, 0x0010, 0x0040
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 VK_MENU, KEYEVENTF_KEYUP = 0x12, 0x0002
 _VK = {"ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B}
 
+# 从托盘唤出时用来区分"主窗口 / 聊天窗口"的标题关键字
+# （QQ 的聊天窗口标题是联系人名，主窗口才叫 "QQ"；微信聊天窗口同理）
+_TITLE_HINTS = {
+    "qq.exe": ("qq",),
+    "weixin.exe": ("微信", "wechat"),
+    "wechat.exe": ("微信", "wechat"),
+    "clash-verge.exe": ("clash",),
+    "thunderbird.exe": ("thunderbird",),
+}
 
-def send_hotkey(spec: str) -> bool:
-    """模拟按下组合键，如 "Ctrl+Alt+W"。"""
+
+def _hotkey_keys(spec: str) -> list[int]:
+    """"Ctrl+Alt+W" -> [VK_CONTROL, VK_MENU, 'W']。无法识别的部分忽略。"""
     keys = []
     for part in (spec or "").split("+"):
         k = part.strip().lower()
@@ -222,6 +234,19 @@ def send_hotkey(spec: str) -> bool:
             keys.append(ord(k.upper()))
         elif k.startswith("f") and k[1:].isdigit():
             keys.append(0x70 + int(k[1:]) - 1)
+    return keys
+
+
+def hotkey_valid(spec: str) -> bool:
+    """至少要有修饰键 + 一个普通键，单键不算全局热键（也顺手挡住打错的格式）。"""
+    keys = _hotkey_keys(spec)
+    mods = set(_VK.values())
+    return len(keys) >= 2 and any(k in mods for k in keys) and any(k not in mods for k in keys)
+
+
+def send_hotkey(spec: str) -> bool:
+    """模拟按下组合键，如 "Ctrl+Alt+W"。"""
+    keys = _hotkey_keys(spec)
     if not keys:
         return False
     try:
@@ -338,6 +363,76 @@ def _hicon_to_image(hicon) -> QtGui.QImage | None:
         return None
 
 
+# ---------------- exe 路径解析 ----------------
+
+_EXE_CACHE: dict[str, str] = {}
+
+
+def _scan_for(root: str, name: str, depth: int = 3) -> str:
+    root = os.path.expandvars(root or "")
+    if not root or not os.path.isdir(root):
+        return ""
+    base = root.rstrip("\\/").count(os.sep)
+    try:
+        for dirpath, dirs, files in os.walk(root):
+            if dirpath.count(os.sep) - base >= depth:
+                dirs[:] = []
+            if any(f.lower() == name for f in files):
+                return os.path.join(dirpath, next(f for f in files if f.lower() == name))
+    except OSError:
+        pass
+    return ""
+
+
+def resolve_app_path(exe_name: str) -> str:
+    """把 "thunderbird.exe" 这种裸文件名解析成完整路径。
+
+    顺序：正在运行的进程 -> 注册表 App Paths -> 常见安装目录里找（结果缓存）。
+    找不到返回空串（调用方给出提示，让用户去设置里手填路径）。
+    """
+    raw = str(exe_name or "").strip().strip('"')
+    if not raw:
+        return ""
+    if os.path.isabs(raw) and os.path.exists(raw):
+        return raw
+    name = os.path.basename(raw).lower()
+    if not name.endswith(".exe"):
+        name += ".exe"
+    hit = _EXE_CACHE.get(name)
+    if hit and os.path.exists(hit):
+        return hit
+    try:                                    # 1) 运行中的进程（最准，也知道装在哪）
+        import psutil
+        for p in psutil.process_iter(["name", "exe"]):
+            if (p.info.get("name") or "").lower() == name:
+                exe = p.info.get("exe") or ""
+                if exe and os.path.exists(exe):
+                    _EXE_CACHE[name] = exe
+                    return exe
+    except Exception:  # noqa: BLE001
+        pass
+    import winreg
+    for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):   # 2) App Paths
+        try:
+            with winreg.OpenKey(root, rf"Software\Microsoft\Windows\CurrentVersion\App Paths\{name}") as k:
+                p = str(winreg.QueryValueEx(k, "")[0] or "").strip('"')
+            p = os.path.expandvars(p)
+            if p and os.path.exists(p):
+                _EXE_CACHE[name] = p
+                return p
+        except OSError:
+            continue
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LOCALAPPDATA", "")
+    for root in (pf, pf86, os.path.join(local, "Programs"), local, os.environ.get("APPDATA", "")):
+        p = _scan_for(root, name)           # 3) 常见安装目录
+        if p:
+            _EXE_CACHE[name] = p
+            return p
+    return ""
+
+
 class WindowService(QtCore.QObject):
     notice = QtCore.Signal(str)
     """Alt-Tab 风格窗口列表、激活、关闭、全屏检测。全部是同步的快速 Win32 调用（主线程可用）。"""
@@ -393,6 +488,15 @@ class WindowService(QtCore.QObject):
                 self._exe_cache.clear()
             self._exe_cache[pid] = p
         return p
+
+    def foreground_exe(self) -> str:
+        """当前前台窗口所属 exe 文件名（小写）。"""
+        try:
+            hwnd = _u32.GetForegroundWindow()
+            path = self._exe_for(_pid(hwnd)) if hwnd else ""
+            return os.path.basename(path).lower() if path else ""
+        except Exception:  # noqa: BLE001
+            return ""
 
     def list_windows(self) -> list[dict]:
         hwnds: list[int] = []
@@ -460,6 +564,10 @@ class WindowService(QtCore.QObject):
         self._icons[hwnd] = img
         return img
 
+    def exe_icon(self, path: str):
+        """返回 exe 的图标，供窗口列表和音量合成器复用。"""
+        return self._exe_icon(path) if path else None
+
     def _exe_icon(self, path: str):
         key = path.lower()
         if key in self._exe_icons:
@@ -479,6 +587,32 @@ class WindowService(QtCore.QObject):
         return img
 
     # ---------------- 操作 ----------------
+    def pull_onscreen(self, hwnd: int) -> bool:
+        """把落在虚拟桌面之外的窗口挪回主屏中央。
+
+        Clash Verge（Tauri）"关闭窗口"的做法不是隐藏，而是把窗口移到 (-21333,-21333)
+        并保持 visible，所以只 SetForegroundWindow 的话用户什么也看不到，它自己的
+        关闭按钮也会因为窗口位置对不上而失灵。"""
+        try:
+            hwnd = int(hwnd)
+            r = W.RECT()
+            if not _u32.GetWindowRect(hwnd, ctypes.byref(r)):
+                return False
+            w_, h_ = r.right - r.left, r.bottom - r.top
+            if w_ <= 0 or h_ <= 0:
+                return False
+            vx, vy = _u32.GetSystemMetrics(76), _u32.GetSystemMetrics(77)   # SM_X/YVIRTUALSCREEN
+            vw, vh = _u32.GetSystemMetrics(78), _u32.GetSystemMetrics(79)
+            if r.left >= vx and r.top >= vy and r.right <= vx + vw and r.bottom <= vy + vh:
+                return False
+            sw, sh = _u32.GetSystemMetrics(0), _u32.GetSystemMetrics(1)
+            x, y = max(0, (sw - w_) // 2), max(0, (sh - h_) // 2)
+            _u32.SetWindowPos(hwnd, 0, x, y, w_, h_,
+                              SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def activate(self, hwnd: int) -> bool:
         try:
             hwnd = int(hwnd)
@@ -486,6 +620,7 @@ class WindowService(QtCore.QObject):
                 return False
             if _u32.IsIconic(hwnd):
                 _u32.ShowWindow(hwnd, SW_RESTORE)
+            self.pull_onscreen(hwnd)
             # 不再模拟按 Alt（会让 QQ / 微信 进入菜单模式）。用户刚点击过灵动岛，本进程通常
             # 有权设置前台窗口；不行时再临时挂接前台线程的输入队列。
             ok = bool(_u32.SetForegroundWindow(hwnd))
@@ -585,12 +720,16 @@ class WindowService(QtCore.QObject):
                 return True
         return False
 
-    def _focus_later(self, exe: str, hk: str = ""):
+    def _focus_later(self, exe: str, hk: str = "", allow_hidden: bool = False, hints: tuple = ()):
+        """发完热键之后确认一下有没有真的出来；没出来就退回 ShowWindow，再不行才提示。"""
         h = self.find_app_window(exe)
-        if h:
-            self.activate(h)
-        else:
-            self.notice.emit(f"没能唤出窗口：请检查该应用的「显示窗口」快捷键是否为 {hk}")
+        if h and self.activate(h):
+            return
+        if allow_hidden:
+            h = self.find_tray_window(exe, hints)
+            if h and self.show_hidden(h):
+                return
+        self.notice.emit(f"「{hk}」没能叫出窗口：去应用的快捷键设置里确认这个组合已经生效")
 
     def show_hidden(self, hwnd: int) -> bool:
         try:
@@ -601,24 +740,112 @@ class WindowService(QtCore.QObject):
         except Exception:  # noqa: BLE001
             return False
 
+    def find_tray_window(self, exe: str, hints: tuple[str, ...] = ()) -> int | None:
+        """最小化到托盘的应用：主窗口只是被隐藏了（没有进入 Alt-Tab 列表）。
+        在属于该进程的顶层窗口里挑一个真正的"主窗口"：
+        没有 owner、不是工具窗口、有标题、可调整大小（WS_THICKFRAME）、面积够大；
+        标题命中 hints 的优先，其次取面积最大的（聊天窗口的标题是联系人名，不会命中）。"""
+        exe = os.path.basename(str(exe or "")).lower()
+        if not exe:
+            return None
+        want = tuple(h.lower() for h in hints if h)
+        hwnds: list[int] = []
+
+        def cb(h, lp):
+            hwnds.append(h)
+            return True
+        try:
+            _u32.EnumWindows(_WNDENUMPROC(cb), 0)
+        except Exception:  # noqa: BLE001
+            return None
+        best = None
+        for h in hwnds:
+            try:
+                if _u32.IsWindowVisible(h) or _u32.GetWindow(h, GW_OWNER):
+                    continue
+                ex_style = _u32.GetWindowLongPtrW(h, GWL_EXSTYLE)
+                if ex_style & WS_EX_TOOLWINDOW and not ex_style & WS_EX_APPWINDOW:
+                    continue
+                style = _u32.GetWindowLongPtrW(h, GWL_STYLE)
+                if not style & WS_THICKFRAME:
+                    continue
+                title = _title(h).strip()
+                if not title:
+                    continue
+                if os.path.basename(self._exe_for(_pid(h))).lower() != exe:
+                    continue
+                r = W.RECT()
+                _u32.GetWindowRect(h, ctypes.byref(r))
+                area = max(0, r.right - r.left) * max(0, r.bottom - r.top)
+                if area < 240 * 180:
+                    continue
+                low = title.lower()
+                score = (1 if any(w in low for w in want) else 0, area)
+                if best is None or score > best[0]:
+                    best = (score, int(h))
+            except Exception:  # noqa: BLE001
+                continue
+        return best[1] if best else None
+
+    def reveal(self, exe: str, hints: tuple[str, ...] = (), allow_hidden: bool = True) -> bool:
+        """唤起某个应用：先找可见的窗口，再（allow_hidden 时）找藏在托盘里的主窗口。"""
+        h = self.find_app_window(exe)
+        if h and self.activate(h):
+            return True
+        if not allow_hidden:
+            return False
+        h = self.find_tray_window(exe, hints)
+        if h:
+            return self.show_hidden(h)
+        return False
+
     def open_or_focus(self, path: str, exe: str | None = None, args=None) -> str:
-        """应用已打开 -> 切到它的窗口；否则启动。返回 "focused" / "launched" / "failed"。"""
-        exe = exe or (os.path.basename(path) if str(path).lower().endswith(".exe") else "")
+        """应用已打开 -> 切到它的窗口；否则启动。返回 "focused" / "launched" / "failed"。
+
+        顺序很重要：
+        1) 已经有可见窗口（含最小化在任务栏）：直接切前台；
+        2) 收在托盘里且配了「显示窗口」热键：发这个热键。Electron 系（QQ / 微信点 X 收起）
+           只是隐藏了窗口，渲染进程也跟着挂起，强行 ShowWindow 出来的只是一个点不动的空壳，
+           任务栏上还补不出按钮，只有应用自己的热键才会走完整的唤醒流程；
+        3) 没配热键（或热键没生效）才退回 ShowWindow（config.json → apps.reveal_hidden）。"""
+        from wisland.core.config import cfg
+        path = str(path or "").strip().strip('"')
+        exe = exe or (os.path.basename(path) if path.lower().endswith(".exe") else "")
+        exe = os.path.basename(exe or "").lower()
+        if not path:
+            path = exe
+        if exe and not (os.path.isabs(path) and os.path.exists(path)):
+            full = resolve_app_path(path or exe)          # "thunderbird.exe" -> 真实安装路径
+            if full:
+                path = full
         if exe:
-            h = self.find_app_window(exe)
-            if h and self.activate(h):
+            hints = _TITLE_HINTS.get(exe, (os.path.splitext(exe)[0],))
+            allow_hidden = exe in [str(x).lower() for x in (cfg.get("apps.reveal_hidden") or [])]
+            if self.reveal(exe, hints, allow_hidden=False):
                 return "focused"
-            # 最小化到托盘（窗口被隐藏）：用应用自己的"显示窗口"热键让它自己恢复，
-            # 不强行 ShowWindow（会和应用内部状态不一致），也不重新启动 exe（微信会开新实例）
-            from wisland.core.config import cfg
-            hk = (cfg.get("apps.restore_hotkey") or {}).get(exe.lower())
-            if hk and self._process_running(exe):
-                if send_hotkey(hk):
-                    QtCore.QTimer.singleShot(600, lambda e=exe, k=hk: self._focus_later(e, k))
+            hk = (cfg.get("apps.restore_hotkey") or {}).get(exe)
+            running = self._process_running(exe)
+            if hk and running and send_hotkey(hk):
+                QtCore.QTimer.singleShot(700,
+                                         lambda e=exe, k=hk, a=allow_hidden, hs=hints:
+                                         self._focus_later(e, k, a, hs))
+                return "focused"
+            if allow_hidden:
+                h = self.find_tray_window(exe, hints)
+                if h and self.show_hidden(h):
                     return "focused"
+            if running and not hk:
+                self.notice.emit(f"{os.path.splitext(exe)[0]} 收在托盘里时叫不出来：给它配一个「显示窗口」热键"
+                                 f"（设置 → 通知与应用 → 托盘唤出）")
+                return "failed"
         if args and isinstance(args, str):
             args = args.split()
-        return "launched" if launch(path, list(args or [])) else "failed"
+        if path and os.path.exists(path):
+            return "launched" if launch(path, list(args or [])) else "failed"
+        if exe:                                          # 进程在跑但唤不出来
+            self.notice.emit(f"没能唤出 {exe}：可在设置里填写它的安装路径 / 显示热键")
+        return "failed"
+
 
     def close(self, hwnd: int) -> bool:
         try:

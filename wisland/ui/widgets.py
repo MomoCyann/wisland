@@ -289,7 +289,7 @@ class Slider(QtWidgets.QWidget, Themed):
         return clamp(x / max(1, self.width()), 0, 1)
 
     def mousePressEvent(self, e):
-        if e.position().x() < self.height() * 0.9:
+        if self.glyph and e.position().x() < self.height() * 0.9:
             self._icon_press = True
             return
         self._icon_press = False
@@ -333,10 +333,11 @@ class Slider(QtWidgets.QWidget, Themed):
             fp = QtGui.QPainterPath()
             fp.addRoundedRect(fr, rad, rad)
             p.fillPath(fp, theme.fill())
-        # 图标：在填充上用深色，在轨道上用主题色
-        p.setFont(icon_font(14))
-        p.setPen(QtGui.QColor(30, 30, 34) if v * r.width() > r.height() * 0.8 else theme.text(0.85))
-        p.drawText(QtCore.QRectF(r.x(), r.y(), r.height() * 1.05, r.height()), Qt.AlignmentFlag.AlignCenter, self.glyph)
+        # 图标：在填充上用深色，在轨道上用主题色；空 glyph 用于音量合成器的纯滑块。
+        if self.glyph:
+            p.setFont(icon_font(14))
+            p.setPen(QtGui.QColor(30, 30, 34) if v * r.width() > r.height() * 0.8 else theme.text(0.85))
+            p.drawText(QtCore.QRectF(r.x(), r.y(), r.height() * 1.05, r.height()), Qt.AlignmentFlag.AlignCenter, self.glyph)
         txt = self.label or f"{round(v * 100)}"
         p.setFont(ui_font(11.5, W.Medium, num=True))
         p.setPen(QtGui.QColor(30, 30, 34, 170) if v > 0.9 else theme.text2())
@@ -413,6 +414,75 @@ class Tile(Hoverable):
         else:
             p.drawText(QtCore.QRectF(tx, r.y(), tw, r.height()), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                        fm.elidedText(self.title, Qt.TextElideMode.ElideRight, int(tw)))
+
+
+class TogglePill(Hoverable):
+    """小开关胶囊：图标 + 文字 + 右侧迷你开关；on 时整颗胶囊变色。"""
+
+    def __init__(self, glyph: str, text: str, parent=None, height: int = 28):
+        super().__init__(parent)
+        self.glyph = glyph
+        self.text = text
+        self.on = False
+        self.enabled_ = True
+        self.setFixedHeight(height)
+        self._fit()
+
+    def _fit(self):
+        fm = QtGui.QFontMetrics(ui_font(11.5, W.Medium))
+        self.setFixedWidth(round(fm.horizontalAdvance(self.text) + 58 + (18 if self.glyph else 0)))
+
+    def set_on(self, on: bool, text: str | None = None, enabled: bool = True):
+        dirty = False
+        if text is not None and text != self.text:
+            self.text = text
+            self._fit()
+            dirty = True
+        if on != self.on or enabled != self.enabled_:
+            self.on, self.enabled_ = bool(on), bool(enabled)
+            dirty = True
+        if dirty:
+            self.update()
+
+    def paintEvent(self, e):
+        p = painter(self)
+        r = QtCore.QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        s = self.press_scale()
+        p.translate(r.center())
+        p.scale(s, s)
+        p.translate(-r.center())
+        on = self.on and self.enabled_
+        p.setPen(Qt.PenStyle.NoPen)
+        bg = theme.on_color() if on else theme.card(1.0 + 0.5 * self._hover.x)
+        if not self.enabled_:
+            bg = theme.card(0.6)
+        p.setBrush(bg)
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        fg = theme.on_fg(0.95) if on else theme.text(0.9 if self.enabled_ else 0.45)
+        x = r.x() + 10
+        if self.glyph:
+            p.setFont(icon_font(12))
+            p.setPen(fg)
+            p.drawText(QtCore.QRectF(x, r.y(), 15, r.height()), Qt.AlignmentFlag.AlignCenter, self.glyph)
+            x += 18
+        p.setFont(ui_font(11.5, W.Medium))
+        p.setPen(fg)
+        tw = r.right() - x - 30
+        p.drawText(QtCore.QRectF(x, r.y(), tw, r.height()),
+                   Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text)
+        # 迷你开关
+        th = 14.0
+        tr = QtCore.QRectF(r.right() - 9 - 26, r.center().y() - th / 2, 26, th)
+        track = QtGui.QColor(255, 255, 255, 90) if on else theme.track()
+        if not self.enabled_:
+            track = theme.track()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(tr, th / 2, th / 2)
+        kr = th - 4
+        kx = tr.right() - 2 - kr if on else tr.x() + 2
+        p.setBrush(theme.on_fg() if on else theme.text(0.75 if self.enabled_ else 0.4))
+        p.drawEllipse(QtCore.QRectF(kx, tr.y() + 2, kr, kr))
 
 
 class Segmented(QtWidgets.QWidget, Themed):

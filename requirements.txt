@@ -12,6 +12,8 @@ winrt-Windows.Foundation.Collections
 winrt-Windows.Storage.Streams
 winrt-Windows.Devices.Radios
 winrt-Windows.Devices.Bluetooth
+winrt-Windows.Networking.Connectivity
+winrt-Windows.Networking.NetworkOperators
 # live Japanese subtitles (speech recognition)
 numpy>=1.26,<3
 SoundCard>=0.4,<1

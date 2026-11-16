@@ -12,7 +12,7 @@ from ctypes import wintypes as W
 
 from PySide6 import QtCore, QtGui
 
-from wisland.core.bg import run_hidden, ui
+from wisland.core.bg import run_bg, run_hidden, ui
 from wisland.core.config import cfg, expand
 
 
@@ -23,8 +23,10 @@ class AudioService(QtCore.QObject):
     """默认播放设备的主音量。所有 COM 调用只在主线程。"""
 
     volume_changed = QtCore.Signal(float, bool)   # (0..1, muted)
+    sessions_changed = QtCore.Signal(list)        # 每应用音量会话（普通字典，不暴露 COM 对象）
 
     POLL_MS = 250
+    SESSION_POLL_S = 0.9
     DEVICE_CHECK_S = 3.0
 
     def __init__(self, parent=None):
@@ -35,6 +37,14 @@ class AudioService(QtCore.QObject):
         self._meter = None    # IAudioMeterInformation
         self._last = None     # (volume, muted)
         self._last_dev_check = 0.0
+        self._out_cache: list[dict] = []   # 播放设备列表（后台刷新，读缓存不阻塞界面）
+        self._out_at = 0.0
+        self._out_busy = False
+        self._sessions_on = False
+        self._sessions_next = 0.0
+        self._session_data: list[dict] = []
+        self._session_controls: dict[str, list] = {}
+        self._session_digest = None
         self._timer = QtCore.QTimer(self)
         self._timer.setInterval(self.POLL_MS)
         self._timer.timeout.connect(self._poll)
@@ -122,6 +132,10 @@ class AudioService(QtCore.QObject):
             if cur != self._last:
                 self._last = cur
                 self.volume_changed.emit(cur[0], cur[1])
+            now = time.monotonic()
+            if self._sessions_on and now >= self._sessions_next:
+                self._sessions_next = now + self.SESSION_POLL_S
+                self._poll_sessions()
         except Exception:  # noqa: BLE001
             traceback.print_exc()
 
@@ -166,6 +180,202 @@ class AudioService(QtCore.QObject):
             self._meter = None
             self._vol = None
             return 0.0
+
+    # ---------------- 应用音量合成器 ----------------
+    def set_session_polling(self, on: bool):
+        self._sessions_on = bool(on)
+        if on:
+            # 页面展开动画期间不立刻做 COM 会话枚举，避免打开控制页时主线程顿一下。
+            self._sessions_next = time.monotonic() + 0.35
+
+    def audio_sessions(self) -> list[dict]:
+        return [dict(x) for x in self._session_data]
+
+    @staticmethod
+    def _session_name(exe: str, display: str, system: bool) -> str:
+        if system:
+            return "系统声音"
+        if display and not display.startswith("@"):
+            return display
+        base = os.path.basename(exe).lower()
+        known = {"cloudmusic.exe": "网易云音乐", "msedge.exe": "Microsoft Edge",
+                 "chrome.exe": "Google Chrome", "firefox.exe": "Firefox",
+                 "qqmusic.exe": "QQ音乐", "spotify.exe": "Spotify"}
+        return known.get(base, os.path.splitext(os.path.basename(exe))[0] or "未知应用")
+
+    def _poll_sessions(self):
+        try:
+            from pycaw.pycaw import AudioUtilities
+            grouped: dict[str, dict] = {}
+            controls: dict[str, list] = {}
+            for session in AudioUtilities.GetAllSessions():
+                try:
+                    state = getattr(session.State, "value", session.State)
+                    if int(state) == 2:           # Expired
+                        continue
+                    pid = int(session.ProcessId or 0)
+                    process = session.Process
+                    exe = ""
+                    if process is not None:
+                        try:
+                            exe = process.exe()
+                        except Exception:  # noqa: BLE001
+                            exe = ""
+                    system = pid == 0
+                    ident = str(getattr(session, "Identifier", "") or "")
+                    key = "system" if system else ("exe:" + os.path.normcase(exe) if exe else f"session:{ident or pid}")
+                    vol = session.SimpleAudioVolume
+                    value = max(0.0, min(1.0, float(vol.GetMasterVolume())))
+                    muted = bool(vol.GetMute())
+                    display = str(getattr(session, "DisplayName", "") or "").strip()
+                    item = grouped.get(key)
+                    if item is None:
+                        item = {"key": key, "pid": pid, "name": self._session_name(exe, display, system),
+                                "exe": exe, "volume": value, "muted": muted,
+                                "active": int(state) == 1, "system": system, "_values": [value], "_mutes": [muted]}
+                        grouped[key] = item
+                    else:
+                        item["active"] = bool(item["active"] or int(state) == 1)
+                        item["_values"].append(value)
+                        item["_mutes"].append(muted)
+                    controls.setdefault(key, []).append(vol)
+                except Exception:  # noqa: BLE001
+                    continue
+            data = []
+            old_order = {x.get("key"): i for i, x in enumerate(self._session_data)}
+            for item in grouped.values():
+                vals = item.pop("_values")
+                muts = item.pop("_mutes")
+                item["volume"] = sum(vals) / max(1, len(vals))
+                item["muted"] = all(muts)
+                data.append(item)
+            data.sort(key=lambda x: (not x["active"], old_order.get(x["key"], 10_000), x["name"].lower()))
+            digest = tuple((x["key"], round(x["volume"], 3), x["muted"], x["active"], x["name"])
+                           for x in data)
+            self._session_controls = controls
+            self._session_data = data
+            if digest != self._session_digest:
+                self._session_digest = digest
+                self.sessions_changed.emit(self.audio_sessions())
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+
+    def set_session_volume(self, key: str, value: float):
+        value = max(0.0, min(1.0, float(value)))
+        for ctl in self._session_controls.get(key, []):
+            try:
+                ctl.SetMasterVolume(value, None)
+            except Exception:  # noqa: BLE001
+                pass
+        self._sessions_next = 0.0
+
+    def set_session_muted(self, key: str, muted: bool):
+        for ctl in self._session_controls.get(key, []):
+            try:
+                ctl.SetMute(1 if muted else 0, None)
+            except Exception:  # noqa: BLE001
+                pass
+        self._sessions_next = 0.0
+
+    def toggle_session_mute(self, key: str):
+        item = next((x for x in self._session_data if x.get("key") == key), None)
+        if item is not None:
+            self.set_session_muted(key, not bool(item.get("muted")))
+
+    # ---------------- 输出设备（切换默认播放设备） ----------------
+    def _enum_output(self) -> list[dict]:
+        """枚举活动的播放设备：[{id, name, default}]。
+
+        会自己初始化 COM（仅限非主线程），所以既能在主线程调用，也能丢到线程池里跑。
+        GetDeviceEnumerator + GetAllDevices + 逐个读 FriendlyName 是十几次 COM 往返，
+        在主线程做会明显卡一下——打开控制页时改走后台线程。
+        """
+        co = None
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                import comtypes
+                comtypes.CoInitialize()
+                co = comtypes
+            except Exception:  # noqa: BLE001
+                co = None
+        out: list[dict] = []
+        try:
+            from pycaw.constants import DEVICE_STATE, EDataFlow
+            from pycaw.utils import AudioUtilities
+            enum = AudioUtilities.GetDeviceEnumerator()
+            cur = enum.GetDefaultAudioEndpoint(0, 1).GetId()
+            for d in AudioUtilities.GetAllDevices(data_flow=EDataFlow.eRender.value,
+                                                  device_state=DEVICE_STATE.ACTIVE.value):
+                props = d.properties or {}
+                full_name = (d.FriendlyName or "").strip() or "未命名设备"
+                name = str(props.get("{A45C254E-DF1C-4EFD-8020-67D146A850E0} 2") or "").strip()
+                adapter = str(props.get("{B3F8FA53-0004-438E-9003-51A46E139BFC} 6") or "").strip()
+                if not name:
+                    cut = max(full_name.rfind(" ("), full_name.rfind(" （"))
+                    name = full_name[:cut].strip() if cut > 0 and full_name.endswith((")", "）")) else full_name
+                out.append({"id": d.id, "name": name or full_name, "adapter": adapter,
+                            "full_name": full_name, "default": d.id == cur})
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+        finally:
+            if co is not None:
+                try:
+                    co.CoUninitialize()
+                except Exception:  # noqa: BLE001
+                    pass
+        return out
+
+    def _put_output(self, devs: list[dict]):
+        if devs:
+            self._out_cache = list(devs)
+            self._out_at = time.monotonic()
+
+    def output_devices(self, cached: bool = False) -> list[dict]:
+        """cached=True 时只返回上次枚举的结果（绝不阻塞，可能为空）。"""
+        if cached:
+            return list(self._out_cache)
+        devs = self._enum_output()
+        self._put_output(devs)
+        return devs
+
+    def default_output(self, cached: bool = False) -> dict | None:
+        devs = self.output_devices(cached=cached)
+        return next((d for d in devs if d["default"]), devs[0] if devs else None)
+
+    def warm_output(self, on_done=None):
+        """后台枚举设备并更新缓存；完成后在主线程回调 on_done(devs)。"""
+        if self._out_busy:
+            return
+        self._out_busy = True
+
+        def done(devs):
+            self._out_busy = False
+            self._put_output(devs)
+            if on_done:
+                on_done(list(self._out_cache))
+
+        def err(_e):
+            self._out_busy = False
+
+        run_bg(self._enum_output, on_done=done, on_error=err)
+
+    def set_default_output(self, dev_id: str) -> bool:
+        """切换默认播放设备（控制台 + 多媒体两个角色一起切，和系统设置的行为一致）。"""
+        try:
+            from pycaw.constants import ERole
+            from pycaw.utils import AudioUtilities
+            AudioUtilities.SetDefaultDevice(dev_id, roles=[ERole.eConsole, ERole.eMultimedia])
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            return False
+        self._vol = self._meter = None        # 重新绑定到新设备
+        self._last_dev_check = 0.0
+        self._session_controls.clear()
+        self._session_digest = None
+        self._sessions_next = 0.0
+        QtCore.QTimer.singleShot(150, self._poll)
+        return True
+
 
 
 # ======================================================================
