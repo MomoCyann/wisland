@@ -20,7 +20,7 @@ import traceback
 
 from PySide6 import QtCore
 
-from wisland.core.bg import ui
+from wisland.core.bg import ui, winrt_loop
 from wisland.core.config import cfg
 
 
@@ -34,25 +34,32 @@ class HotspotService(QtCore.QObject):
         self.state: dict = {"available": False, "on": False, "ssid": "", "clients": 0, "reason": ""}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wake: asyncio.Event | None = None
-        self._thread: threading.Thread | None = None
+        self._task = None
         self._stop = threading.Event()
         self._last = None
         self._busy = False
+        self._detail_active = False
+
+    def set_detail_polling(self, on: bool):
+        on = bool(on)
+        if on != self._detail_active:
+            self._detail_active = on
+            if on:
+                self.refresh()
 
     # ---------- lifecycle ----------
     def start(self):
-        if self._thread and self._thread.is_alive():
+        if self._task is not None and not self._task.done():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="wisland-hotspot", daemon=True)
-        self._thread.start()
+        loop = winrt_loop()
+        self._loop = loop
+        self._task = asyncio.run_coroutine_threadsafe(self._main(), loop)
 
     def stop(self):
         self._stop.set()
         self.refresh()
-        if self._thread:
-            self._thread.join(timeout=2)
-        self._thread = None
+        self._task = None
 
     def refresh(self):
         loop, wake = self._loop, self._wake
@@ -75,29 +82,18 @@ class HotspotService(QtCore.QObject):
             self._busy = False
 
     # ---------- worker ----------
-    def _run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._loop = loop
-        try:
-            loop.run_until_complete(self._main())
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-        finally:
-            self._loop = None
-            loop.close()
-
     async def _main(self):
         self._wake = asyncio.Event()
         try:
-            interval = max(2.0, float(cfg.get("hotspot.interval_s") or 5))
+            base_iv = max(2.0, float(cfg.get("hotspot.interval_s") or 5))
         except (TypeError, ValueError):
-            interval = 5.0
+            base_iv = 5.0
         while not self._stop.is_set():
             try:
                 await self._poll()
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
+            interval = base_iv if self._detail_active else max(20.0, base_iv * 4.0)
             try:
                 await asyncio.wait_for(self._wake.wait(), interval)
             except asyncio.TimeoutError:

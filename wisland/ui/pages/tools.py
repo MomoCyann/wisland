@@ -26,7 +26,15 @@ class ClipRow(Hoverable):
         self.item = item
         self.flash = 0.0
         th = item.get("thumb")
+        if th is None and item.get("kind") == "image" and item.get("image_path"):
+            img = QtGui.QImage(item["image_path"])
+            if not img.isNull():
+                th = img.scaled(360, 300, Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation) if (img.width() > 360 or img.height() > 300) else img
+                item["thumb"] = th
         self.pm = QtGui.QPixmap.fromImage(th) if isinstance(th, QtGui.QImage) and not th.isNull() else None
+        self._scaled_pm: QtGui.QPixmap | None = None
+        self._scaled_sz: QtCore.QSize | None = None
         self.setMinimumHeight(150)
 
     def resizeEvent(self, e):
@@ -92,9 +100,14 @@ class ClipRow(Hoverable):
             p.setClipPath(path)
             p.setBrush(theme.track())
             p.drawRoundedRect(body, 10, 10)
-            img = self.pm.scaled(body.size().toSize() * 2, Qt.AspectRatioMode.KeepAspectRatio,
-                                 Qt.TransformationMode.SmoothTransformation)
-            img.setDevicePixelRatio(2)
+            want_sz = body.size().toSize() * 2
+            if self._scaled_pm is None or self._scaled_sz != want_sz:
+                self._scaled_sz = want_sz
+                img = self.pm.scaled(want_sz, Qt.AspectRatioMode.KeepAspectRatio,
+                                     Qt.TransformationMode.SmoothTransformation)
+                img.setDevicePixelRatio(2)
+                self._scaled_pm = img
+            img = self._scaled_pm
             off = QtCore.QPointF((body.width() - img.width() / 2) / 2, (body.height() - img.height() / 2) / 2)
             p.drawPixmap(body.topLeft() + off, img)
             p.restore()

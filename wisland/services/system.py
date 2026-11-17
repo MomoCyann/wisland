@@ -14,7 +14,7 @@ from ctypes import wintypes as W
 
 from PySide6 import QtCore, QtGui
 
-from wisland.core.bg import launch, run_hidden, ui
+from wisland.core.bg import launch, run_hidden, ui, winrt_loop
 
 
 def _decode(data: bytes) -> str:
@@ -62,25 +62,24 @@ class RadioService(QtCore.QObject):
         self.state: dict = {"wifi_on": False, "wifi_ssid": "", "wifi_signal": None,
                             "bt_on": False, "wifi_available": False, "bt_available": False}
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._thread: threading.Thread | None = None
+        self._task = None
         self._stop = threading.Event()
         self._wake: asyncio.Event | None = None
         self._access = None
         self._last_emit = None
 
     def start(self):
-        if self._thread and self._thread.is_alive():
+        if self._task is not None and not self._task.done():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="wisland-radio", daemon=True)
-        self._thread.start()
+        loop = winrt_loop()
+        self._loop = loop
+        self._task = asyncio.run_coroutine_threadsafe(self._main(), loop)
 
     def stop(self):
         self._stop.set()
         self.refresh()
-        if self._thread:
-            self._thread.join(timeout=2)
-        self._thread = None
+        self._task = None
 
     def refresh(self):
         loop, wake = self._loop, self._wake
@@ -89,18 +88,6 @@ class RadioService(QtCore.QObject):
                 loop.call_soon_threadsafe(wake.set)
             except RuntimeError:
                 pass
-
-    def _run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._loop = loop
-        try:
-            loop.run_until_complete(self._main())
-        except Exception:  # noqa: BLE001
-            traceback.print_exc()
-        finally:
-            self._loop = None
-            loop.close()
 
     async def _main(self):
         self._wake = asyncio.Event()
@@ -583,6 +570,8 @@ class WindowService(QtCore.QObject):
             for h in (large, small):
                 if h.value:
                     _u32.DestroyIcon(h)
+        if len(self._exe_icons) >= 128:
+            self._exe_icons.pop(next(iter(self._exe_icons)))
         self._exe_icons[key] = img
         return img
 

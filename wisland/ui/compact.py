@@ -311,6 +311,8 @@ class CompactView:
         self._lyr_prev = ""
         self._lyr_t = 0.0
         self._lyr_cur = ""
+        self._lyr_full_text = ""
+        self._lyr_full_w = 0.0
         # 实时字幕（收起态两行：日语 / 中文）
         self.sub_on = False
         self.sub_jp = ""
@@ -340,6 +342,7 @@ class CompactView:
             self._sticker_idx = -1
         if not self._sticker_paths:
             self._sticker_pm = None
+            self._sticker_next = time.monotonic() + 10.0
             return
         choices = [i for i in range(len(self._sticker_paths)) if i != self._sticker_idx]
         self._sticker_idx = random.choice(choices or [0])
@@ -680,7 +683,10 @@ class CompactView:
         k = ease_out((t - self._lyr_t) / 0.32)
         p.setFont(ui_font(13, W.Medium))
         fm = QtGui.QFontMetrics(p.font())
-        full = fm.horizontalAdvance(text)
+        if text != self._lyr_full_text:
+            self._lyr_full_text = text
+            self._lyr_full_w = fm.horizontalAdvance(text)
+        full = self._lyr_full_w
         p.save()
         p.setClipRect(QtCore.QRectF(tx, r.y(), tw, r.height()))
         if k < 1 and self._lyr_prev:
@@ -703,12 +709,6 @@ class CompactView:
             for k in (0, 1):
                 p.drawText(QtCore.QRectF(tx - off + k * (full + gap), r.y(), full + 4, r.height()),
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, text)
-            # 两端渐隐
-            for left in (True, False):
-                g = QtGui.QLinearGradient(tx if left else tx + tw - 14, 0, tx + 14 if left else tx + tw, 0)
-                g.setColorAt(0 if left else 1, QtGui.QColor(0, 0, 0, 255))
-                g.setColorAt(1 if left else 0, QtGui.QColor(0, 0, 0, 0))
-            # （渐隐需要独立图层，代价较高，这里省略，靠裁剪即可）
         p.restore()
 
     def _paint_activity(self, p, r, a):

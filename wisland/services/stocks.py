@@ -19,10 +19,9 @@ import os
 import time
 from typing import Callable
 
-import httpx
 from PySide6 import QtCore
 
-from wisland.core.bg import run_bg, ui
+from wisland.core.bg import http_client, run_bg, ui
 from wisland.core.config import DATA_DIR, cfg
 
 CN_TZ = _dt.timezone(_dt.timedelta(hours=8))  # 中国无夏令时，固定 UTC+8
@@ -159,7 +158,6 @@ class StockService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         ui(lambda: None)  # 确保 bg 回调 invoker 在主线程创建
-        self._client = httpx.Client(timeout=httpx.Timeout(6.0, connect=2.0), trust_env=False)
         self._busy = False
         self._running = False
         self._fail_count = 0
@@ -168,6 +166,10 @@ class StockService(QtCore.QObject):
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._tick)
+
+    @property
+    def _client(self):
+        return http_client()
 
     # ---------- lifecycle ----------
     def start(self):

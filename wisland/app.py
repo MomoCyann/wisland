@@ -340,12 +340,12 @@ def main():
 
     # 用户手动把 QQ / 微信切到前台，视为已经查看该应用的新消息。
     def clear_foreground_messages():
+        if not (ctx.notify.counts.get("qq") or ctx.notify.counts.get("wechat")):
+            return
         exe = ctx.windows.foreground_exe()
         kind = "qq" if exe == "qq.exe" else ("wechat" if exe in ("weixin.exe", "wechat.exe") else "")
         if kind and ctx.notify.counts.get(kind, 0):
             ctx.notify.clear(kind)
-    read_timer = QtCore.QTimer(app, interval=1000, timeout=clear_foreground_messages)
-    read_timer.start()
 
     island.flash.connect(ctx.notify.on_flash)
     ctx.mailcheck.new_mail.connect(lambda user, n: ctx.notify._emit(
@@ -558,8 +558,9 @@ def main():
     if cyc > 0:
         QtCore.QTimer(app, interval=cyc * 1000, timeout=auto_cycle).start()
 
-    # ---------------- 全屏时隐藏 ----------------
-    def check_fullscreen():
+    # ---------------- 全屏隐藏与前台消未读（合并为单一 1s 定时器） ----------------
+    def check_foreground_and_fullscreen():
+        clear_foreground_messages()
         if not cfg.get("island.hide_fullscreen", True):
             island.set_fullscreen_hidden(False)
             return
@@ -567,7 +568,7 @@ def main():
             island.set_fullscreen_hidden(ctx.windows.foreground_is_fullscreen(int(island.winId())))
         except Exception:  # noqa: BLE001
             pass
-    fs_timer = QtCore.QTimer(app, interval=1000, timeout=check_fullscreen)
+    fs_timer = QtCore.QTimer(app, interval=1000, timeout=check_foreground_and_fullscreen)
     # ---------------- 启动 ----------------
     island.show()
     if os.environ.get("WISLAND_DEBUG"):

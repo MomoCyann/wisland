@@ -12,10 +12,9 @@ import bisect
 import re
 import threading
 
-import httpx
 from PySide6 import QtCore
 
-from wisland.core.bg import run_bg, ui
+from wisland.core.bg import http_client, run_bg, ui
 from wisland.core.config import cfg
 
 API = "https://music.163.com/api"
@@ -68,7 +67,6 @@ class LyricsService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         ui(lambda: None)
-        self._client = httpx.Client(timeout=httpx.Timeout(8.0, connect=4.0), headers=HEADERS, trust_env=False)
         self._cache: dict[str, Lyrics | None] = {}
         self._pending: set[str] = set()
         self._lock = threading.Lock()
@@ -107,7 +105,7 @@ class LyricsService(QtCore.QObject):
         sid = str(m.get("song_id") or "") or self._search(m)
         if not sid:
             return None
-        r = self._client.get(API + "/song/lyric", params={"id": sid, "lv": 1, "tv": -1})
+        r = http_client().get(API + "/song/lyric", params={"id": sid, "lv": 1, "tv": -1}, headers=HEADERS)
         r.raise_for_status()
         j = r.json()
         if j.get("nolyric") or j.get("uncollected"):
@@ -120,7 +118,7 @@ class LyricsService(QtCore.QObject):
     def _search(self, m: dict) -> str:
         title = re.sub(r"\s*[\(（\[【].*?[\)）\]】]\s*", " ", m.get("title") or "").strip() or m.get("title", "")
         q = f"{title} {m.get('artist') or ''}".strip()
-        r = self._client.get(API + "/search/get/web", params={"s": q, "type": 1, "limit": 8})
+        r = http_client().get(API + "/search/get/web", params={"s": q, "type": 1, "limit": 8}, headers=HEADERS)
         r.raise_for_status()
         songs = ((r.json().get("result") or {}).get("songs")) or []
         if not songs:

@@ -473,9 +473,10 @@ class ControlsPage(Page):
         super().on_show()
         self.ctx.brightness.refresh()
         self.ctx.radio.refresh()
+        self.ctx.clash.set_detail_polling(True)
         hs = getattr(self.ctx, "hotspot", None)
         if hs is not None:
-            hs.refresh()
+            hs.set_detail_polling(True)
         # 先用缓存立刻铺上（打开这一页不能卡），设备枚举丢后台，回来再更新
         self.set_audio_devices()
         self._refresh_audio()
@@ -485,6 +486,10 @@ class ControlsPage(Page):
 
     def on_hide(self):
         self.ctx.audio.set_session_polling(False)
+        self.ctx.clash.set_detail_polling(False)
+        hs = getattr(self.ctx, "hotspot", None)
+        if hs is not None:
+            hs.set_detail_polling(False)
         super().on_hide()
 
 

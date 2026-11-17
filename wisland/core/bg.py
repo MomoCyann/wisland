@@ -2,14 +2,59 @@
 """后台执行小工具：线程池跑阻塞任务，结果通过 Qt 信号回到主线程。"""
 from __future__ import annotations
 
+import asyncio
 import subprocess
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from PySide6 import QtCore
 
-_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="wisland")
+_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wisland")
+_winrt_lock = threading.Lock()
+_winrt_loop: asyncio.AbstractEventLoop | None = None
+_http_lock = threading.Lock()
+_http_direct = None
+
+
+def winrt_loop() -> asyncio.AbstractEventLoop:
+    """共享的后台 asyncio 事件循环线程（供 RadioService、HotspotService 等低频 WinRT 服务共用）。"""
+    global _winrt_loop
+    with _winrt_lock:
+        if _winrt_loop is not None and _winrt_loop.is_running():
+            return _winrt_loop
+        ready = threading.Event()
+        loop_holder: list[asyncio.AbstractEventLoop] = []
+
+        def _runner():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_holder.append(loop)
+            ready.set()
+            loop.run_forever()
+
+        t = threading.Thread(target=_runner, name="wisland-winrt", daemon=True)
+        t.start()
+        ready.wait(timeout=2.0)
+        _winrt_loop = loop_holder[0]
+        return _winrt_loop
+
+
+def http_client():
+    """共享的直连 httpx.Client（连接池复用，trust_env=False）。"""
+    global _http_direct
+    if _http_direct is not None:
+        return _http_direct
+    with _http_lock:
+        if _http_direct is None:
+            import httpx
+            _http_direct = httpx.Client(
+                timeout=httpx.Timeout(8.0, connect=4.0),
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                trust_env=False,
+            )
+        return _http_direct
 
 CREATE_NO_WINDOW = 0x08000000
 

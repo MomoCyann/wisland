@@ -2,11 +2,31 @@
 """主题：浅色 / 深色毛玻璃配色、字体、图标码位。auto 模式按身后画面亮度自动切换。"""
 from __future__ import annotations
 
+from functools import lru_cache
+
 from PySide6 import QtCore, QtGui
 
 UI_FAMILIES = ["HarmonyOS Sans", "MiSans", "Segoe UI Variable Text", "Microsoft YaHei UI", "Segoe UI"]
-NUM_FAMILIES = ["HarmonyOS Sans", "Segoe UI Variable Display", "Segoe UI"]
+NUM_FAMILIES = ["HarmonyOS Sans", "Segoe UI Variable Display", "MiSans", "Microsoft YaHei UI", "Segoe UI"]
 ICON_FAMILIES = ["Segoe Fluent Icons", "Segoe MDL2 Assets"]
+_resolved_fams: dict[str, list[str]] | None = None
+
+
+def _families_for(kind: str) -> list[str]:
+    global _resolved_fams
+    if _resolved_fams is None:
+        try:
+            avail = set(QtGui.QFontDatabase.families())
+        except Exception:  # noqa: BLE001
+            avail = set()
+        if avail:
+            ui_f = [f for f in UI_FAMILIES if f in avail] or UI_FAMILIES
+            num_f = [f for f in NUM_FAMILIES if f in avail] or ui_f
+            ic_f = [f for f in ICON_FAMILIES if f in avail] or ICON_FAMILIES
+            _resolved_fams = {"ui": ui_f, "num": num_f, "icon": ic_f}
+        else:
+            return {"ui": UI_FAMILIES, "num": NUM_FAMILIES, "icon": ICON_FAMILIES}[kind]
+    return _resolved_fams[kind]
 
 
 class G:
@@ -67,20 +87,30 @@ class G:
     LIVE = "\uE720"   # 麦克风
 
 
-def ui_font(px: float, weight: QtGui.QFont.Weight = QtGui.QFont.Weight.Normal, num: bool = False) -> QtGui.QFont:
+@lru_cache(maxsize=128)
+def _cached_ui_font(px_i: int, w_val: int, num: bool) -> QtGui.QFont:
     f = QtGui.QFont()
-    f.setFamilies(NUM_FAMILIES + UI_FAMILIES if num else UI_FAMILIES)
-    f.setPixelSize(max(1, round(px)))
-    f.setWeight(weight)
+    f.setFamilies(_families_for("num" if num else "ui"))
+    f.setPixelSize(px_i)
+    f.setWeight(QtGui.QFont.Weight(w_val))
     f.setHintingPreference(QtGui.QFont.HintingPreference.PreferNoHinting)
     return f
 
 
-def icon_font(px: float) -> QtGui.QFont:
+@lru_cache(maxsize=64)
+def _cached_icon_font(px_i: int) -> QtGui.QFont:
     f = QtGui.QFont()
-    f.setFamilies(ICON_FAMILIES)
-    f.setPixelSize(max(1, round(px)))
+    f.setFamilies(_families_for("icon"))
+    f.setPixelSize(px_i)
     return f
+
+
+def ui_font(px: float, weight: QtGui.QFont.Weight = QtGui.QFont.Weight.Normal, num: bool = False) -> QtGui.QFont:
+    return QtGui.QFont(_cached_ui_font(max(1, round(px)), int(getattr(weight, "value", weight)), bool(num)))
+
+
+def icon_font(px: float) -> QtGui.QFont:
+    return QtGui.QFont(_cached_icon_font(max(1, round(px))))
 
 
 W = QtGui.QFont.Weight

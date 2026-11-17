@@ -8,8 +8,10 @@ import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import numpy as np
+if TYPE_CHECKING:
+    import numpy as np
 
 from ..core.config import DATA_DIR
 
@@ -35,6 +37,7 @@ class Card:
 
 
 def save_wav(path: Path, audio: np.ndarray, rate: int = 16000) -> None:
+    import numpy as np
     pcm = np.clip(audio.astype(np.float32), -1.0, 1.0)
     peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
     if 0 < peak < 0.5:                       # 系统声音偏小时适当放大

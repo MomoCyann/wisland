@@ -9,6 +9,7 @@ from PySide6 import QtCore, QtGui
 from ..core.config import ROOT, cfg, expand
 
 _EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_paths_cache: tuple[str, int, list[Path]] | None = None
 
 
 def sticker_dir() -> Path:
@@ -18,10 +19,17 @@ def sticker_dir() -> Path:
 
 
 def sticker_paths() -> list[Path]:
+    global _paths_cache
     p = sticker_dir()
     try:
-        return sorted((x for x in p.iterdir() if x.is_file() and x.suffix.lower() in _EXTS),
-                      key=lambda x: x.name.lower())
+        st = p.stat()
+        key = (str(p), st.st_mtime_ns)
+        if _paths_cache is not None and _paths_cache[0] == key[0] and _paths_cache[1] == key[1]:
+            return list(_paths_cache[2])
+        res = sorted((x for x in p.iterdir() if x.is_file() and x.suffix.lower() in _EXTS),
+                     key=lambda x: x.name.lower())
+        _paths_cache = (key[0], key[1], res)
+        return list(res)
     except OSError:
         return []
 

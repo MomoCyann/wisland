@@ -211,7 +211,15 @@ class ClashService(QtCore.QObject):
         self._last_totals: tuple[float, int, int] | None = None
         self._last_proxies_t = 0.0
         self._proxy_info: dict = {"group": "", "node": "", "nodes": [], "delay": None}
+        self._detail_active = False
         self.last: dict = {}
+
+    def set_detail_polling(self, on: bool):
+        on = bool(on)
+        if on != self._detail_active:
+            self._detail_active = on
+            if on:
+                self._wake.set()
 
     # ---------- lifecycle ----------
     def start(self):
@@ -321,7 +329,8 @@ class ClashService(QtCore.QObject):
                      "group": "", "node": "", "nodes": [], "delay": None, "sysproxy": en, "transport": ""}
             self.last = d
             self.updated.emit(d)
-            wait = (1.0 if d.get("ok") else 3.0) - (time.monotonic() - t0)
+            interval = 1.0 if (self._detail_active and d.get("ok")) else 3.0
+            wait = interval - (time.monotonic() - t0)
             self._wake.wait(max(0.05, wait))
             self._wake.clear()
 
@@ -329,17 +338,22 @@ class ClashService(QtCore.QObject):
         conf = self._request("GET", "/configs") or {}
         mode = str(conf.get("mode") or "").lower()
         tun = bool((conf.get("tun") or {}).get("enable"))
-        conn = self._request("GET", "/connections") or {}
-        now = time.monotonic()
-        upt, dnt = int(conn.get("uploadTotal") or 0), int(conn.get("downloadTotal") or 0)
         up = down = 0.0
-        if self._last_totals:
-            t, u0, d0 = self._last_totals
-            dt = max(0.2, now - t)
-            if upt >= u0 and dnt >= d0:
-                up, down = (upt - u0) / dt, (dnt - d0) / dt
-        self._last_totals = (now, upt, dnt)
-        if time.time() - self._last_proxies_t > 5 or self._proxy_info.get("_mode") != mode:
+        conns = 0
+        if self._detail_active:
+            conn = self._request("GET", "/connections") or {}
+            now = time.monotonic()
+            upt, dnt = int(conn.get("uploadTotal") or 0), int(conn.get("downloadTotal") or 0)
+            if self._last_totals:
+                t, u0, d0 = self._last_totals
+                dt = max(0.2, now - t)
+                if upt >= u0 and dnt >= d0:
+                    up, down = (upt - u0) / dt, (dnt - d0) / dt
+            self._last_totals = (now, upt, dnt)
+            conns = len(conn.get("connections") or [])
+        else:
+            self._last_totals = None
+        if self._proxy_info.get("_mode") != mode or (self._detail_active and time.time() - self._last_proxies_t > 5):
             try:
                 self._proxy_info = self._proxies(mode)
                 self._proxy_info["_mode"] = mode
@@ -349,7 +363,7 @@ class ClashService(QtCore.QObject):
         en, _srv = read_sysproxy()
         pi = self._proxy_info
         return {"ok": True, "error": "", "running": True, "mode": mode, "tun": tun,
-                "up": up, "down": down, "conns": len(conn.get("connections") or []),
+                "up": up, "down": down, "conns": conns,
                 "group": pi.get("group", ""), "node": pi.get("node", ""), "nodes": list(pi.get("nodes", [])),
                 "delay": pi.get("delay"), "sysproxy": en, "transport": self._transport}
 

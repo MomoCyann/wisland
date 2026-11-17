@@ -457,29 +457,21 @@ def _get_cover_cached(url: str) -> QtGui.QImage | None:
 
 def _download_cover(url: str):
     """下载网易云专辑封面（小图）-> QImage | None。复用直连连接池与内存缓存，避免切歌时每次走代理握手。"""
-    global _cover_client
+    from wisland.core.bg import http_client
     try:
-        import httpx
         u = url.replace("http://", "https://", 1)
         full_url = u + ("&" if "?" in u else "?") + "param=240y240"
         with _cover_lock:
             if full_url in _cover_cache:
                 return _cover_cache[full_url]
-            if _cover_client is None:
-                _cover_client = httpx.Client(
-                    timeout=httpx.Timeout(6.0, connect=3.0),
-                    follow_redirects=True,
-                    trust_env=False,
-                )
-            client = _cover_client
-        r = client.get(full_url)
+        r = http_client().get(full_url, follow_redirects=True)
         r.raise_for_status()
         img = QtGui.QImage.fromData(r.content)
         if img.isNull():
             return None
         with _cover_lock:
             _cover_cache[full_url] = img
-            if len(_cover_cache) > 32:
+            while len(_cover_cache) > 16:
                 _cover_cache.pop(next(iter(_cover_cache)))
         return img
     except Exception:  # noqa: BLE001

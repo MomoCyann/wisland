@@ -162,6 +162,7 @@ class NotifyService(QtCore.QObject):
         self._last_by_kind: dict[str, float] = {}
         self._last_mail_toast = 0.0
         self._max_id: int | None = None
+        self._db_stamp: tuple | None = None
         self._busy = False
         self._mail_busy = False
         self._lock = threading.Lock()
@@ -277,16 +278,27 @@ class NotifyService(QtCore.QObject):
         raise last  # type: ignore[misc]
 
     def _poll_db(self):
-        if not os.path.exists(WPN_DB):
+        try:
+            st = os.stat(WPN_DB)
+        except OSError:
+            return []
+        try:
+            wst = os.stat(WPN_DB + "-wal")
+            stamp = (st.st_mtime_ns, st.st_size, wst.st_mtime_ns, wst.st_size)
+        except OSError:
+            stamp = (st.st_mtime_ns, st.st_size, 0, 0)
+        if self._max_id is not None and stamp == self._db_stamp:
             return []
         if self._max_id is None:
             r = self._query("SELECT MAX(Id) FROM Notification")
             self._max_id = int(r[0][0] or 0) if r else 0
+            self._db_stamp = stamp
             return []
         rows = self._query(
             "SELECT n.Id, h.PrimaryId, n.ArrivalTime, n.Type, n.Payload FROM Notification n "
             "JOIN NotificationHandler h ON h.RecordId = n.HandlerId WHERE n.Id > ? ORDER BY n.Id",
             (self._max_id,))
+        self._db_stamp = stamp
         if rows:
             self._max_id = max(int(r[0]) for r in rows)
         return rows

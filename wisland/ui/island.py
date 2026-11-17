@@ -702,10 +702,16 @@ class Island(QtWidgets.QWidget):
             self.timer.stop()
             self.timer.setInterval(16)
         elif self.mode == "anchored" and self.sw.rest and self.sh.rest and not self.expanded:
-            # 静止收起态：贴纸约 60fps；音乐、歌词、字幕约 45fps；普通时钟约 30fps。
-            # 展开、拖动、切换等动画也由上面的 16ms 分支保持约 60fps。
+            # 静止收起态：活动/字幕/播放中音乐约 45fps，鼠标靠近贴纸约 60fps；
+            # 其余静止状态（时钟、暂停音乐、远离鼠标的贴纸）保持约 9fps (110ms) 渲染边缘微弱流光。
+            settled = self.poke.rest and self.compact_a.rest and self.content_a.rest and self._bd_prev is None
             cm = self.compact.mode()
-            self.timer.setInterval(16 if cm == "pet" else (22 if cm in ("media", "subtitle", "activity") else 33))
+            if not settled or (cm == "pet" and self.compact.near):
+                self.timer.setInterval(16)
+            elif cm in ("subtitle", "activity") or (cm == "media" and self.compact.playing()):
+                self.timer.setInterval(22)
+            else:
+                self.timer.setInterval(110)
         else:
             self.timer.setInterval(16)
 
@@ -1109,13 +1115,16 @@ class Island(QtWidgets.QWidget):
             self.compact.squash = ((1 + 0.05 * pk, 1 - 0.16 * pk) if horiz else (1 - 0.16 * pk, 1 + 0.05 * pk))
             p.save()
             p.setClipPath(path)               # 内容（含表情）不超出灵动岛
-            self.compact.paint(p, bb, self.compact_a.x, self.peak_fn() if self.compact.mode() == "media" else 0.0)
+            self.compact.paint(p, bb, self.compact_a.x,
+                               self.peak_fn() if (self.compact.mode() == "media" and self.compact.playing()) else 0.0)
             p.restore()
         p.end()
 
     # ================================================================ 鼠标
     def _inside(self, gp: QtCore.QPoint) -> bool:
         lp = QtCore.QPointF(gp - self._win_origin)
+        if not self.path.boundingRect().adjusted(-6, -6, 6, 6).contains(lp):
+            return False
         if self.path.contains(lp):
             return True
         return self.body.adjusted(-4, -4, 4, 4).contains(lp)
@@ -1141,6 +1150,9 @@ class Island(QtWidgets.QWidget):
             gp = QtCore.QPointF(QtGui.QCursor.pos())
             lp = gp - QtCore.QPointF(self._win_origin)
             b = self.body
+            near_now = abs(lp.x() - b.center().x()) < b.width() / 2 + 40 and abs(lp.y() - b.center().y()) < b.height() / 2 + 40
+            if near_now and self.compact.mode() == "pet" and self.timer.interval() > 25:
+                self.timer.setInterval(16)
             if b.contains(lp):
                 nx = (lp.x() - b.center().x()) / max(1.0, b.width() / 2)
                 ny = (lp.y() - b.center().y()) / max(1.0, b.height() / 2)

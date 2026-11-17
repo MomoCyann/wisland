@@ -541,6 +541,8 @@ def resolve_appx(spec: str, cb):
 
     def done(loc):
         if loc:
+            if len(_appx_cache) >= 64:
+                _appx_cache.pop(next(iter(_appx_cache)))
             _appx_cache[name] = loc
             cb(os.path.join(loc, rel))
     run_bg(q, on_done=done)
@@ -622,7 +624,7 @@ class PetWidget(QtWidgets.QWidget):
         pm = load_sticker(path, 300)
         if pm is None:
             return None
-        if len(self.cache) >= 8:
+        if len(self.cache) >= 4:
             self.cache.pop(next(iter(self.cache)))
         self.cache[key] = pm
         return pm
@@ -675,6 +677,8 @@ class PetWidget(QtWidgets.QWidget):
     def hideEvent(self, e):
         self._t.stop()
         self._motion.stop()
+        if len(self.cache) > 1:
+            self.cache = {k: v for k, v in self.cache.items() if v is self.pm}
         super().hideEvent(e)
 
     def mousePressEvent(self, e):

@@ -23,11 +23,11 @@ import traceback
 
 import psutil
 
-from wisland.core.bg import run_bg
+from wisland.core.bg import http_client, run_bg
 
 ELOG = os.path.expandvars(r"%LOCALAPPDATA%\NetEase\CloudMusic\cloudmusic.elog")
-PRELOAD_BYTES = 32 * 1024 * 1024    # 回看约一首歌的日志，恢复当前歌曲及红心状态
-MAX_CARRY = 1024 * 1024
+PRELOAD_BYTES = 2 * 1024 * 1024     # 回看最近约 2MB 日志即可覆盖数十首歌的当前曲目与红心状态
+MAX_CARRY = 256 * 1024
 
 # 网易云重启后恢复播放时只写 appRestore{"id":…,"pause":true}，不带歌名，日志里也
 # 还没出现过这首歌的详情；此时按 song_id 查一次公开接口补上标题/歌手/专辑/时长/封面。
@@ -469,23 +469,23 @@ class NeteaseLog:
             self._meta_pending.discard(sid)
             if ok:
                 self._meta[sid] = res
+                while len(self._meta) > 256:
+                    self._meta.pop(next(iter(self._meta)))
                 self._meta_failed.pop(sid, None)
             else:
                 self._meta_failed[sid] = time.monotonic()
         if ok:
             with self._lock:
                 self._apply_meta(sid, res)
+                while len(self._liked_by_id) > 256:
+                    self._liked_by_id.pop(next(iter(self._liked_by_id)))
 
     @staticmethod
     def _fetch_meta(sid: str) -> dict | None:
-        import httpx
         try:
-            # trust_env=False：本机 NO_PROXY 里有 httpx 解析不了的表项，且该接口在境内直连即可
-            with httpx.Client(timeout=httpx.Timeout(8.0, connect=4.0),
-                              headers=META_HEADERS, trust_env=False) as c:
-                r = c.get(META_API, params={"ids": f"[{sid}]"})
-                r.raise_for_status()
-                songs = (r.json() or {}).get("songs") or []
+            r = http_client().get(META_API, params={"ids": f"[{sid}]"}, headers=META_HEADERS)
+            r.raise_for_status()
+            songs = (r.json() or {}).get("songs") or []
         except Exception:  # noqa: BLE001
             traceback.print_exc()
             return None

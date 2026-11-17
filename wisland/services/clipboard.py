@@ -22,7 +22,7 @@ from wisland.core.config import DATA_DIR, cfg
 CLIPS_DIR = DATA_DIR / "clips"
 STORE_PATH = DATA_DIR / "clipboard.json"
 TEXT_MAX = 20_000
-THUMB_W, THUMB_H = 560, 460      # 卡片接近正方形，2 倍屏下也清晰
+THUMB_W, THUMB_H = 360, 300      # 适配剪贴板双列卡片尺寸，减少内存占用
 DEBOUNCE_MS = 120
 IGNORE_WINDOW_S = 0.8
 
@@ -309,9 +309,9 @@ class ClipboardService(QtCore.QObject):
                 items.append({"id": 0, "kind": "text", "text": str(d["text"])[:TEXT_MAX], "image_path": "",
                               "thumb": None, "time": float(d.get("time") or 0), "pinned": bool(d.get("pinned"))})
             elif kind == "image" and d.get("image_path") and os.path.exists(d["image_path"]):
-                img = QtGui.QImage(d["image_path"])
+                # 启动时只记录路径，缩略图延迟到真正打开剪贴板页渲染时再按需解码
                 items.append({"id": 0, "kind": "image", "text": "", "image_path": d["image_path"],
-                              "thumb": _make_thumb(img) if not img.isNull() else None,
+                              "thumb": None,
                               "time": float(d.get("time") or 0), "pinned": bool(d.get("pinned"))})
         for it in items:
             it["id"] = self._next_id

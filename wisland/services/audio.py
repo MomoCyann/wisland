@@ -25,7 +25,8 @@ class AudioService(QtCore.QObject):
     volume_changed = QtCore.Signal(float, bool)   # (0..1, muted)
     sessions_changed = QtCore.Signal(list)        # 每应用音量会话（普通字典，不暴露 COM 对象）
 
-    POLL_MS = 250
+    POLL_MS = 500
+    ACTIVE_POLL_MS = 250
     SESSION_POLL_S = 0.9
     DEVICE_CHECK_S = 3.0
 
@@ -192,6 +193,7 @@ class AudioService(QtCore.QObject):
     # ---------------- 应用音量合成器 ----------------
     def set_session_polling(self, on: bool):
         self._sessions_on = bool(on)
+        self._timer.setInterval(self.ACTIVE_POLL_MS if self._sessions_on else self.POLL_MS)
         if on:
             # 页面展开动画期间不立刻做 COM 会话枚举，避免打开控制页时主线程顿一下。
             self._sessions_next = time.monotonic() + 0.35

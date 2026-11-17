@@ -89,15 +89,23 @@ class LearnService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._syncing = False
+        self._wb_bound = False
         self._tok_cache: dict[str, list] = {}
         self._timer = QtCore.QTimer(self, interval=20000, timeout=self.auto_sync)
-        # fugashi/unidic 词典会映射数百 MB 数据；改为用户实际查词时再按需加载。
+        # fugashi/unidic 词典与 wordbook SQLite 连接均改为用户实际查词/加词时再按需加载。
+
+    def _book(self):
+        from . import wordbook
+        b = wordbook.get()
+        if not self._wb_bound:
+            self._wb_bound = True
+            b.on_change(lambda: ui(self.changed.emit))     # 回调可能来自后台线程
+        return b
 
     def start(self):
-        from . import wordbook
-        wordbook.get().on_change(lambda: ui(self.changed.emit))     # 回调可能来自后台线程
-        self._timer.start()
-        QtCore.QTimer.singleShot(5000, self.auto_sync)
+        if cfg.get("learn.auto_sync", False):
+            self._timer.start()
+            QtCore.QTimer.singleShot(5000, self.auto_sync)
 
     def stop(self):
         self._timer.stop()
@@ -128,31 +136,29 @@ class LearnService(QtCore.QObject):
             return [], f"词典读取失败：{e}"
 
     def has_word(self, word: str) -> bool:
-        from . import wordbook
-        return wordbook.get().has_word(word)
+        return self._book().has_word(word)
 
     # ---------- 单词本 ----------
     def add_card(self, *, word, reading, meaning, sentence="", sentence_zh="", audio=None,
                  push: bool = False) -> int:
-        from . import wordbook
         image = grab_player_image() if cfg.get("learn.screenshot", False) else None
-        card_id = wordbook.get().add(word, reading, meaning, sentence, sentence_zh, audio, image,
-                                     source=str(cfg.get("learn.source", "") or ""))
+        card_id = self._book().add(word, reading, meaning, sentence, sentence_zh, audio, image,
+                                   source=str(cfg.get("learn.source", "") or ""))
         short = (meaning or "").splitlines()[0][:18] if meaning else ""
         self.notice.emit(f"已加入单词本 · {word}" + (f"  {short}" if short else ""))
         if push:
             self.push_cards([card_id])
         elif cfg.get("learn.auto_sync", False):
+            if not self._timer.isActive():
+                self._timer.start()
             QtCore.QTimer.singleShot(800, self.auto_sync)
         return card_id
 
     def cards(self, search: str = "") -> list:
-        from . import wordbook
-        return wordbook.get().all(search)
+        return self._book().all(search)
 
     def delete(self, ids: list[int]):
-        from . import wordbook
-        wordbook.get().delete(ids)
+        self._book().delete(ids)
 
     # ---------- Anki ----------
     def anki_url(self) -> str:
