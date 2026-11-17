@@ -712,6 +712,10 @@ class WindowService(QtCore.QObject):
                 continue
         return best[0] if best else None
 
+    def running(self, exe: str) -> bool:
+        """某个 exe 的进程是否还活着（可能藏在托盘里、没有窗口）。"""
+        return self._process_running(exe)
+
     def _process_running(self, exe: str) -> bool:
         import psutil
         exe = exe.lower()
