@@ -243,21 +243,27 @@ class MediaCard(Card):
         return
 
     def _open_player(self):
-        """点击专辑封面时优先唤出已运行的网易云，否则从安装路径启动。"""
+        """点击专辑封面时唤出网易云：有窗口就切过去，没运行（或只剩后台进程）就启动。"""
         hints = ("网易云音乐", "NetEase CloudMusic", "CloudMusic")
-        result = "failed"
+        args = None
         if self.ctx.windows.reveal("cloudmusic.exe", hints, allow_hidden=True):
-            result = "focused"
+            result, path = "focused", ""
         else:
             items = cfg.get("launcher") or []
             it = next((i for i in items if "cloudmusic" in str(i.get("path", "")).lower()), None)
             if it:
-                result = self.ctx.windows.open_or_focus(expand(it.get("path") or "cloudmusic.exe"),
-                                                        it.get("exe") or "cloudmusic.exe", it.get("args"))
+                path = expand(it.get("path") or "cloudmusic.exe")
+                args = it.get("args")
+                result = self.ctx.windows.open_or_focus(path, it.get("exe") or "cloudmusic.exe", args)
             else:
                 from ...services.system import resolve_app_path
                 path = resolve_app_path("cloudmusic.exe") or "cloudmusic.exe"
                 result = self.ctx.windows.open_or_focus(path, "cloudmusic.exe")
+            # 网易云常驻托盘时进程还在、却没有窗口，open_or_focus 只会提示「去配显示热键」而不启动。
+            # 它是单实例应用，再启动一次就会把自己的窗口调出来，所以这里补一次兜底启动。
+            if result == "failed" and path and os.path.exists(path):
+                extra = args.split() if isinstance(args, str) else list(args or [])
+                result = "launched" if launch(path, extra) else "failed"
         if result in ("focused", "launched") and getattr(self.ctx, "island", None):
             self.ctx.island.collapse()
 
