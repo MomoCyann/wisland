@@ -42,6 +42,7 @@ class AudioService(QtCore.QObject):
         self._out_busy = False
         self._sessions_on = False
         self._sessions_next = 0.0
+        self._sess_mgr = None   # IAudioSessionManager2，随设备一起缓存
         self._session_data: list[dict] = []
         self._session_controls: dict[str, list] = {}
         self._session_digest = None
@@ -64,6 +65,11 @@ class AudioService(QtCore.QObject):
                     CLSID_MMDeviceEnumerator, IMMDeviceEnumerator, comtypes.CLSCTX_INPROC_SERVER)
             dev = self._enum.GetDefaultAudioEndpoint(0, 1)   # eRender, eMultimedia
             self._dev_id = dev.GetId()
+            try:
+                from pycaw.utils import AudioUtilities
+                self._sess_mgr = AudioUtilities.CreateDevice(dev).AudioSessionManager
+            except Exception:  # noqa: BLE001
+                self._sess_mgr = None
             self._vol = dev.Activate(IAudioEndpointVolume._iid_, comtypes.CLSCTX_ALL, None) \
                 .QueryInterface(IAudioEndpointVolume)
             try:
@@ -76,6 +82,7 @@ class AudioService(QtCore.QObject):
         except Exception:  # noqa: BLE001
             # 没有播放设备时会走到这里
             self._vol = self._meter = None
+            self._sess_mgr = None
             self._dev_id = None
             self._last_dev_check = time.monotonic()
             return False
@@ -95,6 +102,7 @@ class AudioService(QtCore.QObject):
                 self._acquire()
         except Exception:  # noqa: BLE001
             self._vol = self._meter = None
+            self._sess_mgr = None
             self._dev_id = None
 
     def _ev(self):
@@ -203,12 +211,43 @@ class AudioService(QtCore.QObject):
                  "qqmusic.exe": "QQ音乐", "spotify.exe": "Spotify"}
         return known.get(base, os.path.splitext(os.path.basename(exe))[0] or "未知应用")
 
+    def _iter_sessions(self):
+        """枚举音频会话。
+
+        不走 AudioUtilities.GetAllSessions()：它每次都重新 CoCreateInstance +
+        GetDefaultAudioEndpoint，单次约 90ms，在主线程上足以卡住音量条的过渡动画。
+        这里复用 _acquire() 缓存下来的 AudioSessionManager2，单次约 0.1ms。
+        """
+        from pycaw.api.audiopolicy import IAudioSessionControl2
+        from pycaw.utils import AudioSession
+
+        if self._sess_mgr is None:
+            if not self._acquire():
+                return []
+        if self._vol is None:
+            self._acquire()
+        try:
+            enum = self._sess_mgr.GetSessionEnumerator()
+            out = []
+            for i in range(enum.GetCount()):
+                ctl = enum.GetSession(i)
+                if ctl is None:
+                    continue
+                ctl2 = ctl.QueryInterface(IAudioSessionControl2)
+                if ctl2 is not None:
+                    out.append(AudioSession(ctl2))
+            return out
+        except Exception:  # noqa: BLE001
+            # 设备被拔掉等：丢掉缓存，下次重新获取
+            self._sess_mgr = None
+            self._vol = self._meter = None
+            return []
+
     def _poll_sessions(self):
         try:
-            from pycaw.pycaw import AudioUtilities
             grouped: dict[str, dict] = {}
             controls: dict[str, list] = {}
-            for session in AudioUtilities.GetAllSessions():
+            for session in self._iter_sessions():
                 try:
                     state = getattr(session.State, "value", session.State)
                     if int(state) == 2:           # Expired

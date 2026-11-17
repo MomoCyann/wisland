@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -13,7 +14,7 @@ from types import SimpleNamespace
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from .core import bg
-from .core.config import CONFIG_PATH, DATA_DIR, ROOT, cfg, expand
+from .core.config import DATA_DIR, ROOT, cfg, expand
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -78,9 +79,21 @@ def autostart_enabled() -> bool:
 
 
 def _autostart_cmd() -> str:
-    """开机自启命令：通过 wisland.vbs 启动（它会选用不带控制台的 pythonw，不会弹出终端窗口）。"""
+    """开机自启命令：优先直接启动项目根目录的 Wisland.exe（无控制台窗口），缺省回退 wisland.vbs。"""
+    exe = ROOT / "Wisland.exe"
+    if exe.is_file():
+        return f'"{exe}"'
     wscript = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "wscript.exe")
     return f'"{wscript}" "{ROOT / "wisland.vbs"}"'
+
+
+def _restart_cmd() -> list[str]:
+    """重启时用的启动命令：沿用当前解释器（Wisland.exe / pythonw.exe / python.exe）跑 run.pyw。"""
+    exe = sys.executable or ""
+    script = str(ROOT / "run.pyw")
+    if not exe:
+        exe = os.path.join(ROOT, ".venv", "Scripts", "pythonw.exe")
+    return [exe, script]
 
 
 def fix_autostart():
@@ -433,21 +446,32 @@ def main():
     ctx.open_settings = open_settings
     ctx.apply_pages = apply_pages
 
-    def reload_cfg():
-        cfg.load()
-        theme.set_mode(cfg.get("island.theme", "auto"))
-        island.register_hotkeys()
-        P["home"].build_launcher()
-        island.apply_page_layout()
-        P["ctl"].apply_visibility()
-        ctx.weather.refresh()
-        island.activity({"glyph": G.CHECK, "title": "配置已重新加载"}, 1.8)
+    def restart_app():
+        """退出并重启：交给独立辅助进程，等本进程退出、锁文件清掉后再拉起新实例。"""
+        island.activity({"glyph": G.REFRESH, "title": "正在重启…"}, 1.2)
+        # 辅助进程沿用和 run.pyw 一样的启动器：.venv 里的 pythonw.exe 在 uv 环境下
+        # 其实是控制台程序，优先用 Wisland.exe 免得闪一下黑框。
+        scripts = os.path.join(ROOT, ".venv", "Scripts")
+        helper = sys.executable
+        for name in ("Wisland.exe", "pythonw.exe"):
+            cand = os.path.join(scripts, name)
+            if os.path.isfile(cand):
+                helper = cand
+                break
+        args = [helper, "-m", "wisland.core.relaunch", str(os.getpid()),
+                str(DATA_DIR / "wisland.lock"), str(ROOT)] + _restart_cmd()
+        try:
+            subprocess.Popen(args, cwd=str(ROOT), close_fds=True,
+                             creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS | NEW_PROCESS_GROUP
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            island.activity({"glyph": G.REFRESH, "title": "重启失败", "sub": "请看 data/wisland.log"}, 3)
+            return
+        QtCore.QTimer.singleShot(120, app.quit)
 
     def build_menu(menu: QtWidgets.QMenu):
         menu.addAction("设置…").triggered.connect(open_settings)
         menu.addAction("展开 / 收起").triggered.connect(island.toggle)
-        menu.addAction("重新加载配置").triggered.connect(reload_cfg)
-        menu.addAction("编辑配置 config.json").triggered.connect(lambda: os.startfile(str(CONFIG_PATH)))  # noqa: S606
         tm = menu.addMenu("主题")
         for mode, label in THEME_NAMES:
             a = tm.addAction(("✓  " if cfg.get("island.theme") == mode else "    ") + label)
@@ -462,8 +486,8 @@ def main():
         a.triggered.connect(lambda: island.set_capture_visible(not island.capture_visible()))
         a = menu.addAction(("✓  " if autostart_enabled() else "    ") + "开机自启")
         a.triggered.connect(lambda: set_autostart(not autostart_enabled()))
-        menu.addAction("打开数据目录").triggered.connect(lambda: os.startfile(str(DATA_DIR)))  # noqa: S606
         menu.addSeparator()
+        menu.addAction("退出并重启").triggered.connect(restart_app)
         menu.addAction("退出 wisland").triggered.connect(app.quit)
 
     # 右键灵动岛 = 打开设置窗口（快捷项留在托盘菜单里）
@@ -514,7 +538,9 @@ def main():
         compact.set_view("music" if compact.playing() else "pet")
     island.nav.add_right_button(G.GEAR, "设置", lambda: open_settings())
 
-    tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff"))), app)
+    app_icon = QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff")))
+    app.setWindowIcon(app_icon)
+    tray = QtWidgets.QSystemTrayIcon(app_icon, app)
     tray.setToolTip("wisland 灵动岛")
     tmenu = QtWidgets.QMenu()
     tmenu.aboutToShow.connect(lambda: (tmenu.clear(), build_menu(tmenu)))

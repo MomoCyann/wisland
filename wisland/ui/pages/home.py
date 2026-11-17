@@ -32,6 +32,8 @@ class Progress(QtWidgets.QWidget, Themed):
         self.stamp = 0.0
         self.playing = False
         self.hover = 0.0
+        self.dragging = False
+        self.drag_pos = 0.0
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._hook_theme()
 
@@ -43,46 +45,161 @@ class Progress(QtWidgets.QWidget, Themed):
         self.update()
 
     def current(self) -> float:
+        if self.dragging and self.dur > 0:
+            return clamp(self.drag_pos, 0, self.dur)
         p = self.pos_ + ((time.monotonic() - self.stamp) if self.playing else 0)
         return clamp(p, 0, self.dur) if self.dur else p
 
+    def _sec_at(self, x: float) -> float:
+        return clamp(x / max(1.0, float(self.width())), 0.0, 1.0) * self.dur
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and self.dur > 0:
+            self.dragging = True
+            self.drag_pos = self._sec_at(e.position().x())
+            self.update()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self.dragging and self.dur > 0:
+            self.drag_pos = self._sec_at(e.position().x())
+            self.update()
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
     def mouseReleaseEvent(self, e):
-        if self.dur > 0:
-            self.seek.emit(clamp(e.position().x() / max(1, self.width()), 0, 1) * self.dur)
+        if e.button() == Qt.MouseButton.LeftButton and (self.dragging or self.dur > 0):
+            sec = self._sec_at(e.position().x())
+            self.dragging = False
+            if self.dur > 0:
+                self.pos_ = sec
+                self.stamp = time.monotonic()
+                self.update()
+                self.seek.emit(sec)
+            e.accept()
+            return
+        super().mouseReleaseEvent(e)
+
+    def wheelEvent(self, e):
+        e.ignore()
 
     def paintEvent(self, e):
         p = painter(self)
         r = QtCore.QRectF(self.rect())
-        y = 6
-        th = 4 + 3 * self.hover
+        y = 6.0
+        active = max(self.hover, 1.0 if self.dragging else 0.0)
+        th = 4.0 + 3.0 * active
         tr = QtCore.QRectF(0, y - th / 2, r.width(), th)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(theme.track())
         p.drawRoundedRect(tr, th / 2, th / 2)
         cur = self.current()
         if self.dur > 0:
-            p.setBrush(theme.text(0.85 + 0.15 * self.hover))
-            p.drawRoundedRect(QtCore.QRectF(0, y - th / 2, max(th, r.width() * cur / self.dur), th), th / 2, th / 2)
+            ratio = clamp(cur / self.dur, 0.0, 1.0)
+            fw = max(th, r.width() * ratio)
+            p.setBrush(theme.text(0.85 + 0.15 * active))
+            p.drawRoundedRect(QtCore.QRectF(0, y - th / 2, fw, th), th / 2, th / 2)
+            if active > 0.02:
+                kr = 4.5 + 1.5 * active
+                kx = clamp(r.width() * ratio, kr, r.width() - kr)
+                p.setBrush(theme.text(0.98))
+                p.drawEllipse(QtCore.QPointF(kx, y), kr, kr)
         p.setFont(ui_font(10.5, num=True))
-        p.setPen(theme.text3())
+        p.setPen(theme.text2() if self.dragging else theme.text3())
         p.drawText(QtCore.QRectF(0, 10, 60, 12), Qt.AlignmentFlag.AlignLeft, fmt_time(cur))
         if self.dur > 0:
             p.drawText(QtCore.QRectF(r.width() - 60, 10, 60, 12), Qt.AlignmentFlag.AlignRight, fmt_time(self.dur))
 
 
+def _make_bloom(img: QtGui.QImage | QtGui.QPixmap | None, cover_size: int) -> tuple[QtGui.QPixmap | None, float]:
+    """根据专辑封面生成多色空间扩散的 Bloom 光晕贴图，返回 (bloom_pixmap, 画布逻辑尺寸)。"""
+    if img is None:
+        return None, 0.0
+    src = img if isinstance(img, QtGui.QImage) else img.toImage()
+    if src.isNull():
+        return None, 0.0
+    canvas = round(cover_size * 2.15)
+    core_sz = round(cover_size * 0.96)
+    core = src.scaled(
+        core_sz, core_sz,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    if core.width() != core_sz or core.height() != core_sz:
+        core = core.copy((core.width() - core_sz) // 2, (core.height() - core_sz) // 2, core_sz, core_sz)
+    core = core.convertToFormat(QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+
+    base = QtGui.QImage(canvas, canvas, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+    base.fill(0)
+    p = QtGui.QPainter(base)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+    off = (canvas - core_sz) / 2.0
+    core_path = QtGui.QPainterPath()
+    core_path.addRoundedRect(QtCore.QRectF(off, off, core_sz, core_sz), core_sz * 0.22, core_sz * 0.22)
+    p.setClipPath(core_path)
+    p.drawImage(QtCore.QRectF(off, off, core_sz, core_sz), core)
+    p.end()
+
+    # 多级降采样再放大，得到保留封面原色分布的平滑高斯状扩散
+    blur = base
+    for step in (26, 11, 18):
+        blur = blur.scaled(step, step, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        blur = blur.scaled(canvas, canvas, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+    # 叠一层加色增强彩度，再做柔和径向衰减；顶部额外羽化，避免在卡片上沿形成水平切线
+    out = QtGui.QImage(canvas, canvas, QtGui.QImage.Format.Format_ARGB32_Premultiplied)
+    out.fill(0)
+    p = QtGui.QPainter(out)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+    p.drawImage(0, 0, blur)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_Plus)
+    p.setOpacity(0.55)
+    p.drawImage(0, 0, blur)
+    p.setOpacity(1.0)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode.CompositionMode_DestinationIn)
+    rad = canvas / 2.0
+    g = QtGui.QRadialGradient(rad, rad, rad)
+    g.setColorAt(0.0, QtGui.QColor(255, 255, 255, 255))
+    g.setColorAt(0.24, QtGui.QColor(255, 255, 255, 230))
+    g.setColorAt(0.46, QtGui.QColor(255, 255, 255, 145))
+    g.setColorAt(0.66, QtGui.QColor(255, 255, 255, 62))
+    g.setColorAt(0.84, QtGui.QColor(255, 255, 255, 14))
+    g.setColorAt(0.96, QtGui.QColor(255, 255, 255, 0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(g)
+    p.drawRect(0, 0, canvas, canvas)
+    # 封面顶部距控件顶边仅约 10px，顶部多留一层平滑羽化以免撞到控件边界被水平切齐
+    top_cut = max(0.0, rad - cover_size * 0.62)
+    top_end = max(top_cut + 8.0, rad - cover_size * 0.42)
+    tg = QtGui.QLinearGradient(0, top_cut, 0, top_end)
+    tg.setColorAt(0.0, QtGui.QColor(255, 255, 255, 0))
+    tg.setColorAt(1.0, QtGui.QColor(255, 255, 255, 255))
+    p.setBrush(tg)
+    p.drawRect(0, 0, canvas, canvas)
+    p.end()
+    return QtGui.QPixmap.fromImage(out), float(canvas)
+
+
 class CoverView(QtWidgets.QWidget):
-    """封面：悬停时轻微放大上浮，并在身后透出封面主色的柔光。"""
+    """封面：悬停时轻微放大上浮，并在身后透出封面色彩扩散 Bloom 光晕。"""
     def __init__(self, size: int, parent=None):
         super().__init__(parent)
         self.size_ = size
         self.pm: QtGui.QPixmap | None = None
-        self.glow = QtGui.QColor(255, 255, 255, 0)
+        self.bloom: QtGui.QPixmap | None = None
+        self.bloom_sz: float = 0.0
         self.h = 0.0
         self.setFixedSize(size + 12, size + 12)
 
-    def set_pixmap(self, pm, glow: QtGui.QColor | None):
+    def set_pixmap(self, pm, bloom=None, bloom_sz: float = 0.0):
         self.pm = pm
-        self.glow = glow or QtGui.QColor(255, 255, 255, 0)
+        self.bloom = bloom
+        self.bloom_sz = bloom_sz
         self.update()
 
     def paintEvent(self, e):
@@ -91,17 +208,13 @@ class CoverView(QtWidgets.QWidget):
         s = 1.0 + 0.07 * self.h
         r = QtCore.QRectF(0, 0, self.size_ * s, self.size_ * s)
         r.moveCenter(c - QtCore.QPointF(0, 2.5 * self.h))
-        if self.h > 0.01 and self.glow.alpha():
-            g = QtGui.QRadialGradient(r.center() + QtCore.QPointF(0, 6), r.width() * 0.75)
-            col = QtGui.QColor(self.glow)
-            col.setAlpha(round(150 * self.h))
-            g.setColorAt(0, col)
-            col2 = QtGui.QColor(self.glow)
-            col2.setAlpha(0)
-            g.setColorAt(1, col2)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(g)
-            p.drawEllipse(r.adjusted(-8, -4, 8, 14))
+        if self.h > 0.01 and self.bloom is not None:
+            bs = self.bloom_sz * (0.94 + 0.10 * self.h)
+            br = QtCore.QRectF(0, 0, bs, bs)
+            br.moveCenter(r.center() + QtCore.QPointF(0, 4))
+            p.setOpacity(0.85 * self.h)
+            p.drawPixmap(br.toRect(), self.bloom)
+            p.setOpacity(1.0)
         if self.pm is not None:
             p.drawPixmap(r.toRect(), self.pm)
 
@@ -109,24 +222,31 @@ class CoverView(QtWidgets.QWidget):
 class CoverTitle(QtWidgets.QWidget):
     """封面在上方居中；歌名和歌手在封面下方独立排布，互不重叠。"""
     clicked = QtCore.Signal()
+    cover_hovered = QtCore.Signal(bool)
     COVER = 87       # 原 58px 的 1.5 倍
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pm: QtGui.QPixmap | None = None
-        self.glow = QtGui.QColor(255, 255, 255, 0)
         self.h = 0.0
         self.title = "未在播放"
         self.sub = ""
-        self.setFixedHeight(self.COVER + 48)
+        self._hovered = False
+        self.setFixedHeight(self.COVER + 50)
         self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Fixed)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("点击唤出网易云音乐")
+        self.setMouseTracking(True)
+        self.setToolTip("点击封面唤出网易云音乐")
         theme.changed.connect(self.update)
 
-    def set_pixmap(self, pm, glow):
+    def _set_cover_hover(self, on: bool):
+        if on == self._hovered:
+            return
+        self._hovered = on
+        self.setCursor(Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
+        self.cover_hovered.emit(on)
+
+    def set_pixmap(self, pm, _glow=None):
         self.pm = pm
-        self.glow = glow or QtGui.QColor(255, 255, 255, 0)
         self.update()
 
     def set_text(self, title, sub):
@@ -137,8 +257,16 @@ class CoverTitle(QtWidgets.QWidget):
         s = 1.0 + 0.07 * self.h
         size = self.COVER * s
         cr = QtCore.QRectF(0, 0, size, size)
-        cr.moveCenter(QtCore.QPointF(self.width() / 2, 4 + self.COVER / 2 - 2.5 * self.h))
+        cr.moveCenter(QtCore.QPointF(self.width() / 2, 7 + self.COVER / 2 - 2.5 * self.h))
         return cr
+
+    def mouseMoveEvent(self, e):
+        self._set_cover_hover(self._cover_rect().contains(e.position()))
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        self._set_cover_hover(False)
+        super().leaveEvent(e)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and self._cover_rect().contains(e.position()):
@@ -151,17 +279,6 @@ class CoverTitle(QtWidgets.QWidget):
         p = painter(self)
         W_ = self.width()
         cr = self._cover_rect()
-        if self.h > 0.01 and self.glow.alpha():
-            g = QtGui.QRadialGradient(cr.center() + QtCore.QPointF(0, 6), cr.width() * 0.8)
-            c1 = QtGui.QColor(self.glow)
-            c1.setAlpha(round(150 * self.h))
-            c2 = QtGui.QColor(self.glow)
-            c2.setAlpha(0)
-            g.setColorAt(0, c1)
-            g.setColorAt(1, c2)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(g)
-            p.drawEllipse(cr.adjusted(-10, -6, 10, 14))
         if self.pm is not None:
             p.drawPixmap(cr.toRect(), self.pm)
         # 两行信息完全放在封面下方：第一行歌名，第二行歌手。
@@ -172,7 +289,7 @@ class CoverTitle(QtWidgets.QWidget):
         maxw = W_ - 20
         title = title_fm.elidedText(self.title, Qt.TextElideMode.ElideRight, int(maxw))
         artist = artist_fm.elidedText(self.sub, Qt.TextElideMode.ElideRight, int(maxw)) if self.sub else ""
-        text_top = 4 + self.COVER + 5
+        text_top = 7 + self.COVER + 5
         title_r = QtCore.QRectF(10, text_top, maxw, 20)
         artist_r = QtCore.QRectF(10, text_top + 21, maxw, 17)
         p.setFont(title_font)
@@ -189,23 +306,29 @@ class MediaCard(Card):
         super().__init__(parent, 20)
         self.ctx = ctx
         self.cover_px: QtGui.QPixmap | None = None
+        self.bloom_pm: QtGui.QPixmap | None = None
+        self.bloom_sz: float = 0.0
         self.cover = CoverTitle(self)
         self._hov = Spring(0, 260, 0.6, 0.004)
+        self._cover_hov = Spring(0, 260, 0.6, 0.004)
         self._ht = QtCore.QTimer(self, interval=16, timeout=self._hover_tick)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+        self.cover.cover_hovered.connect(self._on_cover_hover)
         self.title = Label("未在播放", 15, W.DemiBold)
         self.artist = Label("", 12.5, level=2)
         self.app = Label("", 11, level=3)
         self.prog = Progress()
-        self.like = IconButton(G.HEART, 34, 15, "喜欢 / 取消喜欢（网易云）")
-        self.prev = IconButton(G.PREV, 34, 15, "上一首")
-        self.play = IconButton(G.PLAY, 40, 18, "播放 / 暂停", filled=True)
-        self.next = IconButton(G.NEXT, 34, 15, "下一首")
+        self.like = IconButton(G.HEART, 32, 15, "喜欢 / 取消喜欢（网易云）")
+        self.prev = IconButton(G.PREV, 32, 15, "上一首")
+        self.play = IconButton(G.PLAY, 38, 17, "播放 / 暂停", filled=True)
+        self.next = IconButton(G.NEXT, 32, 15, "下一首")
+        self.mode_btn = IconButton(G.ROAM, 32, 17, "进入漫游模式（再点切换心动模式）")
         self.open_btn = PillButton("打开网易云", G.MUSIC, height=28)
         self.like.clicked.connect(lambda: ctx.media.like())
         self.prev.clicked.connect(lambda: ctx.media.prev())
         self.next.clicked.connect(lambda: ctx.media.next())
         self.play.clicked.connect(lambda: ctx.media.play_pause())
+        self.mode_btn.clicked.connect(lambda: ctx.media.toggle_netease_mode())
         self.prog.seek.connect(lambda s: ctx.media.seek(s))
         self.cover.clicked.connect(self._open_player)
         self.open_btn.clicked.connect(self._open_player)
@@ -213,7 +336,7 @@ class MediaCard(Card):
         self.title.hide()
         self.artist.hide()
         self.app.hide()
-        ctrls = hbox(None, self.like, self.prev, self.play, self.next, None, spacing=6)   # 播放键正对封面
+        ctrls = hbox(None, self.like, self.prev, self.play, self.next, self.mode_btn, None, spacing=3)   # 播放键正对封面
         self.setLayout(vbox(self.cover, self.prog, ctrls, None, spacing=0, margins=(10, 6, 10, 6)))
         self._tick = QtCore.QTimer(self, interval=500, timeout=self.prog.update)
         self._set_cover(None)
@@ -227,20 +350,39 @@ class MediaCard(Card):
         self._hov.to(0.0, 220, 0.8)
         self._ht.start()
 
+    def _on_cover_hover(self, on: bool):
+        if on:
+            self._cover_hov.to(1.0, 260, 0.6)
+        else:
+            self._cover_hov.to(0.0, 220, 0.8)
+        self._ht.start()
+
     def _hover_tick(self):
         self._hov.step(0.016)
+        self._cover_hov.step(0.016)
         h = max(0.0, self._hov.x)
-        self.cover.h = h
+        ch = max(0.0, self._cover_hov.x)
+        self.cover.h = ch
         self.cover.update()
         self.prog.hover = h
         self.prog.update()
         self.update()
-        if self._hov.rest:
+        if self._hov.rest and self._cover_hov.rest:
             self._ht.stop()
 
     def paintEvent(self, e):
-        """不画独立背景，直接嵌在灵动岛玻璃上（悬停时封面 / 进度条有动画）。"""
-        return
+        """保持播放器区域透明无边框，仅在悬停专辑封面时扩散封面原色 Bloom 光晕。"""
+        h = max(0.0, self._cover_hov.x)
+        if h <= 0.01 or self.bloom_pm is None:
+            return
+        p = painter(self)
+        cr = self.cover._cover_rect()
+        center = QtCore.QPointF(self.cover.pos()) + cr.center() + QtCore.QPointF(0, 4)
+        bs = self.bloom_sz * (0.94 + 0.12 * h)
+        br = QtCore.QRectF(0, 0, bs, bs)
+        br.moveCenter(center)
+        p.setOpacity(0.90 * h)
+        p.drawPixmap(br.toRect(), self.bloom_pm)
 
     def _open_player(self):
         """点击专辑封面时唤出网易云：有窗口就切过去，没运行就启动。"""
@@ -273,12 +415,7 @@ class MediaCard(Card):
         cover_size = CoverTitle.COVER
         cover_radius = round(cover_size * 13 / 58)
         px = rounded_pixmap(img, cover_size, cover_radius) if img is not None else None
-        glow = None
-        if img is not None:
-            q = img if isinstance(img, QtGui.QImage) else img.toImage()
-            glow = q.scaled(1, 1, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation).pixelColor(0, 0)
-            h, s_, v, _ = glow.getHsv()
-            glow = QtGui.QColor.fromHsv(max(0, h), min(255, int(s_ * 1.4) + 40), max(170, v))
+        self.bloom_pm, self.bloom_sz = _make_bloom(img, cover_size) if px is not None else (None, 0.0)
         if px is None:
             physical = cover_size * 2
             pm = QtGui.QPixmap(physical, physical)
@@ -294,7 +431,8 @@ class MediaCard(Card):
             p.end()
             pm.setDevicePixelRatio(2)
             px = pm
-        self.cover.set_pixmap(px, glow)
+        self.cover.set_pixmap(px)
+        self.update()
 
     def set_cover(self, img):
         self._set_cover(img)
@@ -308,6 +446,20 @@ class MediaCard(Card):
         self.like.color = QtGui.QColor("#EC4141") if liked else None
         self.like.setToolTip("已喜欢，点击取消喜欢" if liked else "喜欢当前歌曲（网易云）")
         self.like.update()
+        mode = str(m.get("play_mode") or "").lower()
+        if mode == "fm":
+            self.mode_btn.set_glyph(G.ROAM)
+            self.mode_btn.color = theme.on_color()
+            self.mode_btn.setToolTip("当前：漫游模式（点击切换到心动模式）")
+        elif mode == "ai":
+            self.mode_btn.set_glyph(G.PULSE)
+            self.mode_btn.color = QtGui.QColor("#EC4141")
+            self.mode_btn.setToolTip("当前：心动模式（点击切换到漫游模式）")
+        else:
+            self.mode_btn.set_glyph(G.ROAM)
+            self.mode_btn.color = None
+            self.mode_btn.setToolTip("进入漫游模式（再点切换心动模式）")
+        self.mode_btn.update()
         self.prog.set_state(m)
         self.prog.setVisible(True)
         self.prog.setEnabled(has and (m.get("duration") or 0) > 0)

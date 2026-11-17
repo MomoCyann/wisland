@@ -740,13 +740,15 @@ class CompactView:
         x = cr.right() + 10
         if t in ("volume", "brightness"):
             v = clamp(act.get("value", 0.0), 0, 1)
+            fv = 0.0 if act.get("muted") else v      # 静音时填充清空，音量值保留在 v 里
             bw = r.right() - 52 - x
             track = QtCore.QRectF(x, cy - 3, bw, 6)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme.track())
             p.drawRoundedRect(track, 3, 3)
             p.setBrush(theme.text(a))
-            p.drawRoundedRect(QtCore.QRectF(x, cy - 3, max(6, bw * v * enter), 6), 3, 3)
+            if fv > 0.001:
+                p.drawRoundedRect(QtCore.QRectF(x, cy - 3, max(6, bw * fv * enter), 6), 3, 3)
             p.setFont(ui_font(12.5, W.DemiBold, num=True))
             p.setPen(theme.text(a))
             p.drawText(QtCore.QRectF(r.right() - 48, r.y(), 34, r.height()),

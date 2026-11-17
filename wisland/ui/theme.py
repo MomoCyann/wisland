@@ -52,6 +52,7 @@ class G:
     BELL = "\uEA8F"
     CHAT = "\uE8F2"
     MUSIC = "\uE8D6"
+    ROAM = "\uE93C"
     HEART = "\uEB51"
     HEART_FILL = "\uEB52"
     MONITOR = "\uE7F4"

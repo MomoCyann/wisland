@@ -381,6 +381,9 @@ class Island(QtWidgets.QWidget):
             self.show_page(page)
         if not self.expanded:
             self.expanded = True
+            # 每次展开都先清掉「等鼠标进来」的临时锁，避免上一次残留。托盘 / 热键
+            # 唤出时 toggle() 会在 expand() 之后重新挂上。
+            self.locks.discard("enter")
             self.compact_a.to(0, 900, 1.0)
             self.poke.snap(0.0)                       # 展开时清掉按压形变
             w, h = self.target_size()
@@ -406,6 +409,7 @@ class Island(QtWidgets.QWidget):
         if self.passthrough():
             self._apply_passthrough()
         self.locks.discard("pin")
+        self.locks.discard("enter")
         self.pages[self.stack.currentIndex()].on_hide()
         if cfg.get("island.last_tab") != self._page_key:
             cfg.set("island.last_tab", self._page_key)          # 下次（包括重启后）打开仍是这一页
@@ -419,7 +423,10 @@ class Island(QtWidgets.QWidget):
             self.collapse()
         else:
             self.expand(page)
-            self.locks.add("pin")
+            # 托盘 / 热键唤出时鼠标多半还在外面（托盘图标处）：先挂一个「等鼠标进来」的
+            # 临时锁，否则刚展开就会被当成鼠标在岛外而收起。鼠标一旦进来就解开，
+            # 之后移出即可按默认延迟收起；没进来时再点一次托盘也仍然直接收起。
+            self.locks.add("enter")
 
     def page(self, key: str):
         for p in self.all_pages:
@@ -516,6 +523,7 @@ class Island(QtWidgets.QWidget):
             self.content.hide()
             self.release_focus()
             self.locks.discard("pin")
+            self.locks.discard("enter")
             self.pages[self.stack.currentIndex()].on_hide()
             self.expanded_changed.emit(False)
             # 收成胶囊，中心向鼠标靠拢
@@ -949,11 +957,13 @@ class Island(QtWidgets.QWidget):
             lay.addWidget(self.stack, 1)
 
     def _request_backdrop(self):
-        moving = self.mode != "anchored" or not (self.sw.rest and self.sh.rest)
+        dragging_or_uncovered = self.mode != "anchored"
         if self.mode == "anchored":
             tw, th = self.target_size()
-            tc = self._center_on_edge(self.edge, self._anchor_along(tw, th), 0, tw, th)
-            g = QtCore.QRectF(tc.x() - tw / 2, tc.y() - th / 2, tw, th).toAlignedRect()
+            # 预留欠阻尼弹簧略微过冲的空间，避免切页拉高到波峰时越出背景截图边界
+            pad_h = round(th * 1.12) if self.expanded else th
+            tc = self._center_on_edge(self.edge, self._anchor_along(tw, pad_h), 0, tw, pad_h)
+            g = QtCore.QRectF(tc.x() - tw / 2, tc.y() - pad_h / 2, tw, pad_h).toAlignedRect()
             if not self.expanded:
                 # 收起时也预先截取展开尺寸的背景：打开的第一帧就有正确的玻璃，不会闪
                 ew, eh = self.expanded_size()
@@ -970,17 +980,18 @@ class Island(QtWidgets.QWidget):
         x0, y0 = (g.left() // q) * q, (g.top() // q) * q
         x1, y1 = -((-(g.right() + 1)) // q) * q, -((-(g.bottom() + 1)) // q) * q
         g = QtCore.QRect(x0, y0, x1 - x0, y1 - y0)
-        if moving:
+        need = self.path.boundingRect().toAlignedRect().translated(self._win_origin).intersected(self.scr.geometry())
+        uncovered = not self.backdrop.covers(need)
+        if dragging_or_uncovered or uncovered:
             interval = 1 / 40
         else:
             fps = max(2.0, float(cfg.get("island.blur_fps", 10)))
             interval = 1 / (fps if self.expanded else min(fps, 3.0))   # 收起静止时身后画面变化不敏感
             if self.capture_visible():
-                # 参与截图时，每次取背景都要临时把自己排除约 17ms：静止时降低频率，
-                # 让截图 / 录屏几乎总能拍到灵动岛（动画、拖动时仍高频刷新）
+                # 参与截图时，每次取背景都要临时把自己排除约 17ms：静止与原地切页时降低频率，
+                # 避免高度变化期间以 40FPS 高频开关 WDA_EXCLUDEFROMCAPTURE 引发背景闪烁
                 interval = 1 / (1.5 if self.expanded else 1.0)
-        need = self.path.boundingRect().toAlignedRect().translated(self._win_origin).intersected(self.scr.geometry())
-        self.backdrop.request(self.scr, g, interval, urgent=not self.backdrop.covers(need))
+        self.backdrop.request(self.scr, g, interval, urgent=uncovered)
 
     def _on_backdrop(self, changed: bool):
         theme.feed_luminance(self.backdrop.luminance)
@@ -1013,27 +1024,53 @@ class Island(QtWidgets.QWidget):
         p.strokePath(path, QtGui.QPen(QtGui.QBrush(rg), 1.0))
         self._paint_rest(p, path, bb)
 
+    def _fill_backdrop(self, p: QtGui.QPainter, path: QtGui.QPainterPath, state) -> bool:
+        """边缘夹紧绘制毛玻璃背景：不用 QBrush 平铺，防止高度变化瞬间把顶部壁纸颜色回绕到底部形成光带闪烁。"""
+        if not state or state[0] is None:
+            return False
+        tiny, rect = state[0], state[1]
+        tw, th = tiny.width(), tiny.height()
+        if tw <= 0 or th <= 0:
+            return False
+        dr = QtCore.QRectF(rect.translated(-self._win_origin))
+        bb = path.boundingRect()
+        p.save()
+        p.setClipPath(path, Qt.ClipOperation.IntersectClip)
+        p.drawImage(dr, tiny)
+        # 若新高度略微超出当前/上一帧截图底图，沿四边 1px 夹紧延展，绝不循环回绕顶部像素
+        if bb.top() < dr.top():
+            p.drawImage(QtCore.QRectF(dr.left(), bb.top(), dr.width(), dr.top() - bb.top()),
+                        tiny, QtCore.QRectF(0, 0, tw, 1))
+        if bb.bottom() > dr.bottom():
+            p.drawImage(QtCore.QRectF(dr.left(), dr.bottom(), dr.width(), bb.bottom() - dr.bottom()),
+                        tiny, QtCore.QRectF(0, th - 1, tw, 1))
+        y0, y1 = min(bb.top(), dr.top()), max(bb.bottom(), dr.bottom())
+        if bb.left() < dr.left():
+            p.drawImage(QtCore.QRectF(bb.left(), y0, dr.left() - bb.left(), y1 - y0),
+                        tiny, QtCore.QRectF(0, 0, 1, th))
+        if bb.right() > dr.right():
+            p.drawImage(QtCore.QRectF(dr.right(), y0, bb.right() - dr.right(), y1 - y0),
+                        tiny, QtCore.QRectF(tw - 1, 0, 1, th))
+        p.restore()
+        return True
+
     def _paint_glass(self, p: QtGui.QPainter, path: QtGui.QPainterPath, crossfade: bool = True):
         """毛玻璃底 + 色调 + 光泽（灵动岛本体与内容渐显面纱共用）。"""
         base_opacity = p.opacity()
         # 2) 毛玻璃底（新截图与上一张交叉淡入，避免跳变）
         state = self.backdrop.state
-        br = self.backdrop.brush_for(state, self._win_origin)
+        has_cur = bool(state and state[0] is not None)
         fade = (time.perf_counter() - self._bd_fade_t0) / 0.25 if self._bd_prev is not None else 1.0
         if fade < 1.0:
-            prev = self.backdrop.brush_for(self._bd_prev, self._win_origin)
-            if prev is not None:
-                p.fillPath(path, prev)
-            if br is not None:
+            self._fill_backdrop(p, path, self._bd_prev)
+            if has_cur:
                 p.setOpacity(base_opacity * max(0.0, fade))
-                p.fillPath(path, br)
+                self._fill_backdrop(p, path, state)
                 p.setOpacity(base_opacity)
         else:
             if crossfade:
                 self._bd_prev = None
-            if br is not None:
-                p.fillPath(path, br)
-            else:
+            if not self._fill_backdrop(p, path, state):
                 p.fillPath(path, QtGui.QColor(128, 128, 128, 200))
         if crossfade:
             self._bd_shown = state
@@ -1092,6 +1129,10 @@ class Island(QtWidgets.QWidget):
             self._hover_since = self._out_since = None
             return
         inside = self._inside(QtGui.QCursor.pos())
+        if inside and self.expanded and "enter" in self.locks:
+            # 托盘 / 热键唤出时挂的临时锁：鼠标已经移到岛上了，说明用户过来看过或操作了。
+            # 解开它，之后移出就按 collapse_delay_ms 正常收起。
+            self.locks.discard("enter")
         now = time.monotonic()
         if not self.expanded and self.mode == "anchored" and not self._fs_hidden:
             # 收起时（任何展开方式）：鼠标靠近就把水滴"挤"一下，离开后带回弹地恢复
@@ -1207,6 +1248,7 @@ class Island(QtWidgets.QWidget):
         if new == "never" and self.expanded:
             # 双击长关：立即收起，不等鼠标移出；也不显示任何提示文字
             self.locks.discard("pin")
+            self.locks.discard("enter")
             self.release_focus()
             self.collapse()
 
@@ -1280,6 +1322,7 @@ class Island(QtWidgets.QWidget):
         elif mode == "never":
             # 不立即收起：鼠标离开灵动岛后才收起（之后悬停 / 单击都不再展开）
             self.locks.discard("pin")
+            self.locks.discard("enter")
             if not self._inside(QtGui.QCursor.pos()):
                 self.collapse()
         self.mode_changed.emit(mode)

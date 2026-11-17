@@ -80,6 +80,8 @@ def styled_menu(parent=None) -> QtWidgets.QMenu:
 
 class AppAudioIcon(Hoverable):
     """音量合成器里的应用图标；点击切换该应用静音。"""
+    toggled = QtCore.Signal(bool)      # 立刻把新状态同步给同行滑块，不必等下一次轮询
+
     def __init__(self, ctx, info: dict, parent=None):
         super().__init__(parent)
         self.ctx = ctx
@@ -105,6 +107,7 @@ class AppAudioIcon(Hoverable):
         muted = not bool(self.info.get("muted"))
         self.info["muted"] = muted
         self.ctx.audio.set_session_muted(self.info["key"], muted)
+        self.toggled.emit(muted)
         self.update()
 
     def paintEvent(self, e):
@@ -136,6 +139,7 @@ class AppVolumeRow(QtWidgets.QWidget):
         self.ctx = ctx
         self.info = dict(info)
         self.icon = AppAudioIcon(ctx, info)
+        self.icon.toggled.connect(self.set_muted)
         self.name = Label(info.get("name") or "未知应用", 11.5, W.Medium)
         self.name.setFixedWidth(82)
         self.slider = Slider("", height=30)
@@ -149,8 +153,12 @@ class AppVolumeRow(QtWidgets.QWidget):
         self.icon.set_info(info)
         self.name.setText(info.get("name") or "未知应用")
         self.name.setToolTip(info.get("exe") or self.name.text())
-        self.slider.label = "静音" if info.get("muted") else ""
+        self.set_muted(bool(info.get("muted")))
         self.slider.set_value(float(info.get("volume") or 0), animate=False)
+
+    def set_muted(self, muted: bool):
+        self.slider.label = "静音" if muted else ""
+        self.slider.set_muted(bool(muted))   # 静音时填充收空，值仍保留，取消静音后填回
         self.slider.update()
 
 
@@ -365,6 +373,7 @@ class ControlsPage(Page):
         self.vol.glyph = G.MUTE if muted else (G.VOLUME_LOW if v < 0.34 else G.VOLUME)
         self.vol.label = "静音" if muted else ""
         self.vol.set_value(v)
+        self.vol.set_muted(muted)      # 静音时填充收空，值仍保留 80，取消静音后自动填回
 
     def set_brightness(self, mons: list):
         if not mons:

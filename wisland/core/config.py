@@ -60,6 +60,7 @@ DEFAULTS: dict = {
         "auto_show": True,           # 开始播放时收起态自动切到音乐（暂停 5 秒后切到贴纸）
         "lyrics": True,              # 收起态显示歌词（网易云公开歌词接口）
         "netease_log": True,         # 读取网易云本地日志获得播放状态与进度（网易云默认不接入系统媒体控件）
+        "poll_ms": 700,              # 播放状态刷新间隔；调小更跟手但更费 CPU
         "priority": ["cloudmusic", "bilibili", "chrome", "zen", "msedge", "firefox"],
     },
     "notify": {

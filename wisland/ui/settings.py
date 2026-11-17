@@ -509,6 +509,7 @@ class SettingsWindow(QtWidgets.QWidget):
         collapse = self._ms_slider("collapse_delay_ms", 120, 1200, " ms")
         cycle = self._ms_slider("auto_cycle_s", 0, 120, " 秒")
         media_width = self._ms_slider("island.compact_media_width", 360, 760, " px", 10)
+        poll = self._ms_slider("media.poll_ms", 100, 3000, " ms", 50)
         raw_stickers = str(cfg.get("island.sticker_dir", "march7stickers") or "march7stickers")
         sticker_path = expand(raw_stickers)
         if not os.path.isabs(sticker_path):
@@ -544,6 +545,7 @@ class SettingsWindow(QtWidgets.QWidget):
                 Row("收起延迟", "鼠标离开后多久收起", collapse),
                 Row("收起态轮换", "时间天气与小形象自动轮换的间隔，0 = 不轮换", cycle),
                 Row("收起态音乐宽度", "歌名或歌词超过该长度时会在胶囊内左右滚动", media_width),
+                Row("播放器刷新间隔", "播放状态的同步频率；调小更跟手，调大更省 CPU", poll),
                 Row("贴纸图片文件夹", "主页和可穿透小形象共用；文件夹里放 png/jpg/webp/gif/bmp 即可", hbox(f_stickers, b_stickers, spacing=6)),
             ]),
             Group("交互", [
@@ -551,7 +553,7 @@ class SettingsWindow(QtWidgets.QWidget):
                 Row("参与截图 / 录屏", "关掉后截图和录屏里看不到灵动岛", t_cap),
                 Row("前台全屏时隐藏", "玩游戏 / 看全屏视频时自动收起", t_fs),
                 Row("双击切换长关", "双击灵动岛或页面空白处切换悬停展开与长关", t_dbl),
-                Row("开机自启", "以当前用户身份写入启动项（通过 wisland.vbs 启动，不弹控制台）", t_auto),
+                Row("开机自启", "以当前用户身份写入启动项（通过 Wisland.exe 启动，不弹控制台）", t_auto),
             ]),
             spacing=14))
         return w

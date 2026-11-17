@@ -42,6 +42,7 @@
     "auto_show": true,
     "lyrics": true,
     "netease_log": true,
+    "poll_ms": 700,
     "priority": [
       "cloudmusic",
       "bilibili",

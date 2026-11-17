@@ -255,8 +255,10 @@ class Slider(QtWidgets.QWidget, Themed):
         self.glyph = glyph
         self.value = 0.0
         self.shown = Spring(0, 520, 1.0, 0.002)
+        self.fill = Spring(1, 520, 1.0, 0.002)   # 填充系数：静音时收空，取消静音后填回
         self.dragging = False
         self.label = ""
+        self.muted = False          # 静音时填充留空，音量值保持不变，取消静音后再填回去
         self.setFixedHeight(height)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._t = QtCore.QTimer(self, interval=16, timeout=self._tick)
@@ -272,6 +274,15 @@ class Slider(QtWidgets.QWidget, Themed):
             self.shown.snap(self.value)
         self._kick()
 
+    def set_muted(self, b: bool):
+        """静音时把填充收空，取消静音再填回记住的音量；音量值本身不变。"""
+        b = bool(b)
+        if b == self.muted:
+            return
+        self.muted = b
+        self.fill.to(0.0 if b else 1.0)
+        self._kick()
+
     def _kick(self):
         if not self._t.isActive():
             self._last = time.perf_counter()
@@ -279,10 +290,12 @@ class Slider(QtWidgets.QWidget, Themed):
 
     def _tick(self):
         now = time.perf_counter()
-        self.shown.step(min(0.05, now - self._last))
+        dt = min(0.05, now - self._last)
+        self.shown.step(dt)
+        self.fill.step(dt)
         self._last = now
         self.update()
-        if self.shown.rest:
+        if self.shown.rest and self.fill.rest:
             self._t.stop()
 
     def _val_at(self, x: float) -> float:
@@ -327,20 +340,27 @@ class Slider(QtWidgets.QWidget, Themed):
         path.addRoundedRect(r, rad, rad)
         p.fillPath(path, theme.track())
         v = clamp(self.shown.x, 0, 1)
-        if v > 0:
-            fw = max(r.height(), r.width() * v)
+        fv = v * clamp(self.fill.x, 0, 1)      # 静音时填充系数收到 0，音量值本身不变
+        if fv > 0.001:
+            # 不用 max(r.height(), ...) 兜底：那会让填充在 13% 以下恒为一段 26px 的
+            # 胶囊，静音收尾时会「啪」地跳一下再消失。改成按实际宽度收缩。
+            # 再与容器的圆角路径求交：宽度小于圆角直径时，填充自己的小圆角会凸出
+            # 容器左端的圆弧，求交后才会贴着容器的圆角一起收进去。
+            # 用求交而不是 setClipPath —— 裁剪默认不做抗锯齿，会在圆弧边缘切出硬边。
+            fw = r.width() * fv
+            rr = min(rad, fw / 2)
             fr = QtCore.QRectF(r.x(), r.y(), fw, r.height())
             fp = QtGui.QPainterPath()
-            fp.addRoundedRect(fr, rad, rad)
-            p.fillPath(fp, theme.fill())
+            fp.addRoundedRect(fr, rr, rr)
+            p.fillPath(fp.intersected(path), theme.fill())
         # 图标：在填充上用深色，在轨道上用主题色；空 glyph 用于音量合成器的纯滑块。
         if self.glyph:
             p.setFont(icon_font(14))
-            p.setPen(QtGui.QColor(30, 30, 34) if v * r.width() > r.height() * 0.8 else theme.text(0.85))
+            p.setPen(QtGui.QColor(30, 30, 34) if fv * r.width() > r.height() * 0.8 else theme.text(0.85))
             p.drawText(QtCore.QRectF(r.x(), r.y(), r.height() * 1.05, r.height()), Qt.AlignmentFlag.AlignCenter, self.glyph)
         txt = self.label or f"{round(v * 100)}"
         p.setFont(ui_font(11.5, W.Medium, num=True))
-        p.setPen(QtGui.QColor(30, 30, 34, 170) if v > 0.9 else theme.text2())
+        p.setPen(QtGui.QColor(30, 30, 34, 170) if fv > 0.9 else theme.text2())
         p.drawText(r.adjusted(0, 0, -12, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, txt)
 
 
