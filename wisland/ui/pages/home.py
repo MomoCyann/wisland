@@ -733,6 +733,7 @@ class HistoryList(QtWidgets.QWidget, Themed):
 
 class MessagesPage(Page):
     key, glyph, title, height = "msg", G.MESSAGE, "消息", 270
+    TILE_H, HEAD_H, ROW_H, GAP, MAX_H = 84, 26, 30, 8, 270   # 卡片 / 按钮行 / 记录 / 间距 / 最高
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -745,6 +746,9 @@ class MessagesPage(Page):
             t.clicked.connect(lambda k=k: self._open(k))
         self.hist = HistoryList()
         self.sc = ScrollArea()
+        # ScrollArea 默认最小高度 50，会把整页最小高度顶到 176；这里改成一条记录的高度，
+        # 让页面最小高度与 refresh() 算出的高度保持一致，布局才不会被纵向压缩。
+        self.sc.setMinimumHeight(self.ROW_H)
         lay = QtWidgets.QVBoxLayout(self.sc.inner)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.hist)
@@ -774,7 +778,12 @@ class MessagesPage(Page):
         has_hist = bool(hist)
         self.head.setVisible(has_hist)
         self.sc.setVisible(has_hist)
-        self.set_height(84 if not has_hist else min(270, 126 + min(len(hist), 5) * 30))
+        if not has_hist:
+            self.set_height(self.TILE_H)
+        else:
+            base = self.TILE_H + self.GAP + self.HEAD_H + self.GAP    # 卡片 + 按钮行
+            rows = min(len(hist), 5)                                   # 最多展示 5 条，其余滚动
+            self.set_height(min(self.MAX_H, base + rows * self.ROW_H))
 
     def on_show(self):
         super().on_show()
