@@ -628,6 +628,11 @@ class SettingsWindow(QtWidgets.QWidget):
         t_auto = Toggle(auto_on)
         if auto_set is not None:
             t_auto.toggled.connect(lambda on: auto_set(bool(on)))
+        admin_get, admin_set = self.hooks.get("admin_start_get"), self.hooks.get("admin_start_set")
+        t_admin = Toggle(bool(admin_get()) if admin_get else False)
+        t_admin.setEnabled(admin_set is not None)
+        if admin_set is not None:
+            t_admin.toggled.connect(admin_set)
 
         w = QtWidgets.QWidget()
         w.setLayout(vbox(
@@ -648,7 +653,8 @@ class SettingsWindow(QtWidgets.QWidget):
                 Row("参与截图 / 录屏", "关掉后截图和录屏里看不到灵动岛", t_cap),
                 Row("前台全屏时隐藏", "玩游戏 / 看全屏视频时自动收起", t_fs),
                 Row("双击切换长关", "双击灵动岛或页面空白处切换悬停展开与长关", t_dbl),
-                Row("开机自启", "以当前用户身份写入启动项（通过 Wisland.exe 启动，不弹控制台）", t_auto),
+                Row("开机自启", "登录 Windows 后运行 Wisland", t_auto),
+                Row("启动时请求管理员权限", "适用于以管理员身份运行的全屏游戏。开启后，低权限启动时会显示 Windows 确认框", t_admin),
             ]),
             spacing=14))
         return w

@@ -40,6 +40,7 @@ class NavBar(QtWidgets.QWidget):
         self.w = [Spring(ICON_W, 260, 0.56, 0.05) for _ in items]
         self.hover = [Spring(0, 400, 1.0, 0.01) for _ in items]
         self.badges: dict[str, int] = {}
+        self._daily_reminders: tuple[str, ...] = ()
         if self.w:                               # 允许先建空的，稍后 set_items 填内容
             self.w[0].snap(self.full_w[0])
         self._hover_i = -1
@@ -111,14 +112,22 @@ class NavBar(QtWidgets.QWidget):
             self.badges[key] = n
             self.update()
 
+    def set_daily_reminders(self, reminders: tuple[str, ...]):
+        if self._daily_reminders != reminders:
+            self._daily_reminders = reminders
+            self.update()
+
     def event(self, event):
         if event.type() == QtCore.QEvent.Type.ToolTip:
             i = self._hit(event.pos())
             count = self.badges.get("calendar", 0)
-            if i >= 0 and count and self.items[i][0] == "calendar":
-                QtWidgets.QToolTip.showText(event.globalPos(), f"{count} 项活动将在 72 小时内结束", self,
-                                           self._rects()[i].toAlignedRect())
-                return True
+            if i >= 0 and self.items[i][0] == "calendar":
+                lines = [f"{count} 项待确认活动将在 72 小时内结束"] if count else []
+                lines.extend(self._daily_reminders)
+                if lines:
+                    QtWidgets.QToolTip.showText(event.globalPos(), "\n".join(lines), self,
+                                               self._rects()[i].toAlignedRect())
+                    return True
         return super().event(event)
 
     def _kick(self):
@@ -254,8 +263,8 @@ class NavBar(QtWidgets.QWidget):
                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, label)
                 p.restore()
             n = self.badges.get(key, 0)
+            badge = QtCore.QPointF(r.x() + ICON_W / 2 + 8, r.y() + 7)
             if n:
-                badge = QtCore.QPointF(r.x() + ICON_W / 2 + 8, r.y() + 7)
                 p.setPen(Qt.PenStyle.NoPen)
                 if key == "calendar":
                     p.setBrush(QtGui.QColor("#FFD686" if theme.dark else "#A45300"))
@@ -268,3 +277,13 @@ class NavBar(QtWidgets.QWidget):
                 else:
                     p.setBrush(QtGui.QColor("#ff453a"))
                     p.drawEllipse(badge + QtCore.QPointF(-1, 1), 3.2, 3.2)
+            if key == "calendar" and self._daily_reminders:
+                marker = badge + QtCore.QPointF(0, r.height() - 14 if n else 0)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QtGui.QColor("#B32636"))
+                p.drawEllipse(marker, 5.7, 5.7)
+                pen = QtGui.QPen(QtGui.QColor("#FFFFFF"), 1.3)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                p.drawLine(marker - QtCore.QPointF(0, 2.6), marker + QtCore.QPointF(0, 0.3))
+                p.drawPoint(marker + QtCore.QPointF(0, 2.4))

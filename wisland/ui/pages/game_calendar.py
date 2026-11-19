@@ -32,6 +32,10 @@ def _month_day(dt: datetime) -> str:
     return f"{dt.month}/{dt.day}"
 
 
+def _activity_key(game: str, item: Activity) -> str:
+    return f"{game}|{item.start.isoformat()}|{item.end.isoformat()}|{item.name}"
+
+
 def _shore_colors():
     """色板用完后在原有色相内延伸，避免同一页有重复色值。"""
     seen = set()
@@ -57,10 +61,12 @@ class _Row:
     game: str = ""
     collapsed: bool = False
     tone: str = ""
+    acknowledged: bool = False
 
 
 class _Timeline(QtWidgets.QWidget):
     game_clicked = QtCore.Signal(str)
+    activity_clicked = QtCore.Signal(str, object)
 
     def __init__(self, ruler=False):
         super().__init__()
@@ -70,7 +76,7 @@ class _Timeline(QtWidgets.QWidget):
         self.now = datetime.now(BEIJING)
         self.start = self.now
         self._hovered_game = ""
-        self._pressed_game = ""
+        self._pressed_row: _Row | None = None
         self.setMouseTracking(not ruler)
         self.setFixedHeight(36 if ruler else 0)
         theme.changed.connect(self.update)
@@ -144,16 +150,15 @@ class _Timeline(QtWidgets.QWidget):
         item = row.activity
         tone = QtGui.QColor(row.tone)
         left, right = self._x(0), self._x(DAYS)
-        start_x = self._x(max(0, (item.start - self.start) / DAY))
-        end_x = self._x(min(DAYS, (item.end - self.start) / DAY))
-        width = max(5.0, end_x - start_x)
-        bar = QtCore.QRectF(min(start_x, right - width), y + 3, width, ROW_H - 6)
+        bar = self._bar_rect(item, y)
         ongoing = item.start <= self.now <= item.end
         upcoming = item.start > self.now
         fill = QtGui.QColor(tone)
-        if not ongoing:
+        if row.acknowledged:
+            fill.setAlphaF(0.28 if ongoing else 0.12)
+        elif not ongoing:
             fill.setAlphaF(0.22 if upcoming else 0.13)
-        if upcoming:
+        if upcoming and not row.acknowledged:
             outline = tone if theme.dark else tone.darker(145)
             p.setPen(QtGui.QPen(outline, 1))
         else:
@@ -174,8 +179,8 @@ class _Timeline(QtWidgets.QWidget):
                 label = QtCore.QRectF(left, y, before - 6, ROW_H)
                 align = Qt.AlignmentFlag.AlignRight
         if label.width() > 0:
-            text_color = theme.text2() if item.end < self.now else theme.text()
-            p.setPen(QtGui.QColor("#1d2230") if ongoing and inline else text_color)
+            text_color = theme.text2() if item.end < self.now or row.acknowledged else theme.text()
+            p.setPen(QtGui.QColor("#1d2230") if ongoing and inline and not row.acknowledged else text_color)
             text = metrics.elidedText(row.title, Qt.TextElideMode.ElideRight, int(label.width()))
             p.drawText(label, Qt.AlignmentFlag.AlignVCenter | align, text)
 
@@ -206,18 +211,27 @@ class _Timeline(QtWidgets.QWidget):
         note = p.fontMetrics().elidedText(row.note, Qt.TextElideMode.ElideRight, note_width)
         p.drawText(QtCore.QRectF(note_x, y, note_width, ROW_H), Qt.AlignmentFlag.AlignVCenter, note)
 
-    def _game_at(self, pos: QtCore.QPoint) -> str:
+    def _bar_rect(self, item: Activity, y: int) -> QtCore.QRectF:
+        start_x = self._x(max(0, (item.start - self.start) / DAY))
+        end_x = self._x(min(DAYS, (item.end - self.start) / DAY))
+        width = max(5.0, end_x - start_x)
+        return QtCore.QRectF(min(start_x, self._x(DAYS) - width), y + 3, width, ROW_H - 6)
+
+    def _row_at(self, pos: QtCore.QPoint) -> _Row | None:
         if self.rect().contains(pos):
             i = pos.y() // ROW_H
-            if i < len(self.rows) and self.rows[i].activity is None:
-                return self.rows[i].game
-        return ""
+            if i < len(self.rows):
+                row = self.rows[i]
+                if row.game and (row.activity is None or self._bar_rect(row.activity, i * ROW_H).contains(QtCore.QPointF(pos))):
+                    return row
+        return None
 
     def mouseMoveEvent(self, event):
-        game = self._game_at(event.position().toPoint())
+        row = self._row_at(event.position().toPoint())
+        game = row.game if row and row.activity is None else ""
+        self.setCursor(Qt.CursorShape.PointingHandCursor if row else Qt.CursorShape.ArrowCursor)
         if game != self._hovered_game:
             self._hovered_game = game
-            self.setCursor(Qt.CursorShape.PointingHandCursor if game else Qt.CursorShape.ArrowCursor)
             self.update()
         super().mouseMoveEvent(event)
 
@@ -229,17 +243,20 @@ class _Timeline(QtWidgets.QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._pressed_game = self._game_at(event.position().toPoint())
-            if self._pressed_game:
+            self._pressed_row = self._row_at(event.position().toPoint())
+            if self._pressed_row:
                 event.accept()
                 return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._pressed_game:
-            game, self._pressed_game = self._pressed_game, ""
-            if game == self._game_at(event.position().toPoint()):
-                self.game_clicked.emit(game)
+        if event.button() == Qt.MouseButton.LeftButton and self._pressed_row:
+            row, self._pressed_row = self._pressed_row, None
+            if row == self._row_at(event.position().toPoint()):
+                if row.activity is None:
+                    self.game_clicked.emit(row.game)
+                else:
+                    self.activity_clicked.emit(row.game, row.activity)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -261,11 +278,13 @@ class _Timeline(QtWidgets.QWidget):
         if not self.ruler and event.type() == QtCore.QEvent.Type.ToolTip:
             i = event.pos().y() // ROW_H
             if 0 <= i < len(self.rows) and (item := self.rows[i].activity):
+                row = self.rows[i]
                 state = "已结束" if item.end < self.now else "未开始" if item.start > self.now else "进行中"
                 desc = escape(" ".join(item.description.split())[:380])
                 tip = (f"<b>{escape(item.name)}</b><br>{state}"
                        f"{(' · ' + escape(item.kind)) if item.kind else ''}<br>"
                        f"{item.start:%m/%d %H:%M} – {item.end:%m/%d %H:%M}（北京时间）")
+                tip += "<br>已确认 · 点击色条恢复提醒" if row.acknowledged else "<br>点击色条确认活动"
                 if desc:
                     tip += f"<br><p style='white-space:normal'>{desc}</p>"
                 QtWidgets.QToolTip.showText(event.globalPos(), tip, self, QtCore.QRect(0, i * ROW_H, self.width(), ROW_H))
@@ -279,6 +298,7 @@ class GameCalendarPage(Page):
     key, glyph, title, height = "calendar", G.CALENDAR, "活动日历", 450
     REFRESH_SECONDS = 1800
     deadlines_changed = QtCore.Signal(int)
+    daily_reminders_changed = QtCore.Signal(object)
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -288,6 +308,8 @@ class GameCalendarPage(Page):
         self._failed: set[str] = set()
         self._requested: dict[str, float] = {}
         self._collapsed: set[str] = set()
+        saved = cfg.get("game_calendar.acknowledged")
+        self._acknowledged = {key for key in saved if isinstance(key, str)} if isinstance(saved, list) else set()
         self._monitoring = False
         self._week = 0
         self._timer = QtCore.QTimer(self, interval=60_000, timeout=self._refresh)
@@ -300,14 +322,17 @@ class GameCalendarPage(Page):
         next_.clicked.connect(lambda: self._shift(1))
         self._reload = IconButton(G.REFRESH, 28, 12, "刷新活动")
         self._reload.clicked.connect(lambda: self._refresh(force=True))
+        self._ack_all = IconButton(G.CHECK, 28, 13)
+        self._ack_all.clicked.connect(self._acknowledge_deadlines)
         self._range = Label("", 12, W.Medium, level=2)
         self._range.setToolTip("北京时间")
-        header = hbox(Label("活动日历", 15, W.DemiBold), self._range, None, prev, today, next_, self._reload,
+        header = hbox(Label("活动日历", 15, W.DemiBold), self._range, None, prev, today, next_, self._reload, self._ack_all,
                       spacing=4, margins=(2, 0, 2, 0))
 
         self._ruler = _Timeline(ruler=True)
         self._timeline = _Timeline()
         self._timeline.game_clicked.connect(self._toggle_game)
+        self._timeline.activity_clicked.connect(self._toggle_activity)
         self._scroll = ScrollArea()
         self._scroll.verticalScrollBar().setFixedWidth(SCROLL_W)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
@@ -315,6 +340,7 @@ class GameCalendarPage(Page):
         card = Card(radius=14)
         card.setLayout(vbox(hbox((self._ruler, 1), SCROLL_W, spacing=0), (self._scroll, 1), spacing=0))
         self._daily = DailyPanel(self)
+        self._daily.reminders_changed.connect(self.daily_reminders_changed)
         self._daily_enabled = bool(cfg.get("game_daily.enabled", True))
         self._daily.setVisible(self._daily_enabled)
         self.setLayout(vbox(self._daily, header, (card, 1), spacing=8))
@@ -324,12 +350,11 @@ class GameCalendarPage(Page):
         super().on_show()
         self._games = selected_games()
         self._refresh()
-        if self._daily_enabled:
-            self._daily.start()
+        self._sync_daily_monitoring()
 
     def on_hide(self):
-        self._daily.stop()
         super().on_hide()
+        self._sync_daily_monitoring()
 
     def set_monitoring(self, on: bool):
         if self._monitoring == on:
@@ -341,6 +366,13 @@ class GameCalendarPage(Page):
         else:
             self._timer.stop()
             self.deadlines_changed.emit(0)
+        self._sync_daily_monitoring()
+
+    def _sync_daily_monitoring(self):
+        if self._daily_enabled and (self._monitoring or self.active):
+            self._daily.start()
+        else:
+            self._daily.stop()
 
     def set_games(self, games: list[str]):
         self._games = games
@@ -352,8 +384,7 @@ class GameCalendarPage(Page):
         self._daily.setVisible(self._daily_enabled)
         self._daily.stop()
         self._daily.reload_sources()
-        if self.active and self._daily_enabled:
-            self._daily.start()
+        self._sync_daily_monitoring()
         if self.active and self.island:
             self.island.page_size_changed()
 
@@ -385,9 +416,15 @@ class GameCalendarPage(Page):
 
     def _upcoming_deadlines(self, now: datetime) -> list[tuple[str, Activity]]:
         cutoff = now + DEADLINE_WINDOW
-        return sorted(((game, item) for game in self._games if game in self._data
-                       for item in self._data[game].activities if now < item.end <= cutoff),
-                      key=lambda entry: entry[1].end)
+        pending = {}
+        for game in self._games:
+            if data := self._data.get(game):
+                for item in data.activities:
+                    if now < item.end <= cutoff:
+                        key = _activity_key(game, item)
+                        if key not in self._acknowledged:
+                            pending[key] = (game, item)
+        return sorted(pending.values(), key=lambda entry: entry[1].end)
 
     def _update_activity_view(self):
         if self.active:
@@ -407,6 +444,20 @@ class GameCalendarPage(Page):
             self._collapsed.add(game)
         self._render()
 
+    def _toggle_activity(self, game: str, item: Activity):
+        self._acknowledged.symmetric_difference_update({_activity_key(game, item)})
+        self._save_acknowledgments()
+
+    def _acknowledge_deadlines(self):
+        pending = self._upcoming_deadlines(datetime.now(BEIJING))
+        if pending:
+            self._acknowledged.update(_activity_key(game, item) for game, item in pending)
+            self._save_acknowledgments()
+
+    def _save_acknowledgments(self):
+        cfg.set("game_calendar.acknowledged", sorted(self._acknowledged))
+        self._render()
+
     def _render(self):
         now = datetime.now(BEIJING)
         start = datetime.combine(now.date(), time.min, BEIJING) + (self._week * 7 - 2) * DAY
@@ -419,6 +470,8 @@ class GameCalendarPage(Page):
         colors = {(game, item): next(tones) for game in GAMES if game in self._data
                   for item in sorted(self._data[game].activities, key=lambda item: (item.end, item.name, item.start))}
         deadlines = self._upcoming_deadlines(now)
+        self._ack_all.setEnabled(bool(deadlines))
+        self._ack_all.setToolTip(f"确认 72 小时内到期的 {len(deadlines)} 项活动" if deadlines else "暂无待确认的临期活动")
         for game in self._games:
             collapsed = game in self._collapsed
             data = self._data.get(game)
@@ -438,7 +491,8 @@ class GameCalendarPage(Page):
                 note = " · ".join(filter(None, (note, "刷新失败 · 上次数据")))
             rows.append(_Row(GAMES[game], note, game=game, collapsed=collapsed))
             if not collapsed:
-                rows.extend(_Row(item.name, activity=item, game=game, tone=colors[game, item]) for item in items)
+                rows.extend(_Row(item.name, activity=item, game=game, tone=colors[game, item],
+                                 acknowledged=_activity_key(game, item) in self._acknowledged) for item in items)
         if not rows:
             rows.append(_Row("未选择游戏", "在「设置 → 活动日历」里选择"))
         self._ruler.set_window(start, now, [], deadlines)

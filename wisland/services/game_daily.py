@@ -43,6 +43,8 @@ class Daily:
     completed: datetime | None = None
     stamina: str = "暂无刷本记录"
     run: Run = field(default_factory=Run)
+    activity_full: bool | None = None
+    reminder_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,26 @@ def locate_logs(root: str = "", folders: dict[str, str] | None = None) -> dict[s
 def daily_start(now: datetime) -> datetime:
     local = now.astimezone(BEIJING)
     return datetime.combine((local - timedelta(hours=4)).date(), time(4), BEIJING)
+
+
+def daily_reminders_due(now: datetime) -> bool:
+    return now >= daily_start(now) + timedelta(minutes=1)
+
+
+def daily_reminder(daily: Daily, now: datetime) -> str:
+    if not daily_reminders_due(now) or daily.activity_full is True:
+        return ""
+    if daily.activity == "找不到日志":
+        return daily.activity
+    if daily.reminder_detail:
+        return daily.reminder_detail
+    if daily.run.started and not daily.run.ended:
+        return "已启动 · 活跃度待确认"
+    if daily.activity_full is False:
+        return "每日活跃度未满"
+    if not (daily.run.started or daily.run.ended or daily.completed or daily.activity != "暂无记录"):
+        return "未见运行记录"
+    return "活跃度未确认"
 
 
 @lru_cache(maxsize=32)
@@ -242,6 +264,7 @@ def _hsr(folder: Path, since: datetime, fallback: Run) -> Daily:
         result.run = latest_run
     if score is not None:
         result.activity = f"每日实训 {score}/500"
+        result.activity_full = score >= 500
     if dungeons:
         result.stamina = "、".join(f"{name} ×{n}" for name, n in dungeons.items())
     return result
@@ -259,9 +282,14 @@ def _zzz(rows, fallback: Run) -> Daily:
             direct = Run(started=stamp)
             before = last = None
             saw_fight = False
-        if "指令[ 活跃度奖励 ]" in line and ("返回状态 活跃度已满" in line or "执行成功 返回状态 成功" in line):
-            result.activity = "活跃度已满" if "活跃度已满" in line or result.activity == "活跃度已满" else "已领活跃度奖励"
-            result.completed = result.completed or stamp
+        if "指令[ 活跃度奖励 ]" in line:
+            if "返回状态 活跃度已满" in line:
+                result.activity = "活跃度已满"
+                result.activity_full = True
+                result.completed = result.completed or stamp
+            elif "返回状态 活跃度未满" in line and result.activity_full is not True:
+                result.activity = "活跃度未满"
+                result.activity_full = False
         if match := re.search(r"指令\[\s*((?:区域巡防|实战模拟室|专业挑战室)\s+.*?)\s*\] 节点 战斗结束.*战斗结果-(?:再来一次|完成)", line):
             dungeons[match[1]] += 1
             saw_fight = True
@@ -300,11 +328,12 @@ def _ww(rows, fallback: Run) -> Daily:
             direct.ended, direct.state = stamp, "脚本完成"
         if match := re.search(r"(?:TacetTask|ForgeryTask|SimulationTask):info_set current_stamina\s+(\d+)|BaseWWTask:current stamina: (-?\d+) (?:must_use completed|not enough to continue)", line):
             meter = int(match[1] or match[2])
-            if pending and last is not None and meter < last:
-                dungeons[target] += 1
-                spent += pending
+            if pending and meter != last:
+                if last is not None and 0 <= meter <= last - pending:
+                    dungeons[target] += 1
+                    spent += pending
                 pending = 0
-            last = meter
+            last = meter if meter >= 0 else None
         if match := re.search(r"info_set (Teleport to Tacet Suppression|Teleport to Forgery Challenge|Target Simulation Challenge)\s+(\d+)", line):
             category, unit = {"Teleport to Tacet Suppression": ("无音区", 60),
                               "Teleport to Forgery Challenge": ("凝素领域", 40),
@@ -320,6 +349,10 @@ def _ww(rows, fallback: Run) -> Daily:
         result.stamina = "、".join(f"{name} ×{n}" for name, n in dungeons.items())
         if spent:
             result.stamina += f" · 波片 −{spent}"
+    if result.completed:
+        result.activity_full = spent >= 180
+        if not result.activity_full:
+            result.reminder_detail = "流程完成 · 未确认消耗至少 180 波片"
     result.run = _merge_run(fallback, direct)
     return result
 

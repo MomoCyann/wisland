@@ -66,6 +66,8 @@ user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
 user32.GetWindow.restype = wintypes.HWND
 user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+user32.ScreenToClient.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+user32.ScreenToClient.restype = wintypes.BOOL
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
 user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                 ctypes.c_int, ctypes.c_int, wintypes.UINT]
@@ -92,14 +94,18 @@ def parse_hotkey(s: str) -> tuple[int, int] | None:
 
 
 class _RightClickHook:
-    """穿透模式下窗口对鼠标完全透明；用低级鼠标钩子只截获落在灵动岛上的右键。
-    只在穿透模式开启时安装，回调对非右键消息立即放行。"""
-    WM_RBUTTONDOWN, WM_RBUTTONUP = 0x0204, 0x0205
+    """穿透时接收落在灵动岛上的右键及收起态滚轮。"""
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_MOUSEWHEEL = 0x0204, 0x0205, 0x020A
 
     def __init__(self, island):
         self.island = island
         self.handle = None
         self._proc = None
+        self._right_captured = False
+
+    def remove_if_unused(self):
+        if not self.island.passthrough() and not self._right_captured:
+            self.remove()
 
     def install(self):
         if self.handle:
@@ -123,38 +129,43 @@ class _RightClickHook:
         isl = self.island
 
         def proc(code, wparam, lparam):
-            if code == 0 and wparam == 0x020A:        # WM_MOUSEWHEEL
+            if code != 0 or wparam not in (self.WM_RBUTTONDOWN, self.WM_RBUTTONUP, self.WM_MOUSEWHEEL):
+                return u.CallNextHookEx(self.handle, code, wparam, lparam)
+
+            if wparam == self.WM_RBUTTONUP:
+                if self._right_captured:
+                    self._right_captured = False
+                    QtCore.QTimer.singleShot(0, isl, self.remove_if_unused)
+                    return 1  # 即使全屏窗口已移走光标，也要配对吞掉这次松手
+            elif wparam == self.WM_RBUTTONDOWN:
+                self._right_captured = False
+                if isl.passthrough():
+                    info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+                    if isl.isVisible() and isl._inside_native(info.pt):
+                        self._right_captured = True
+                        QtCore.QTimer.singleShot(0, isl, isl._exit_passthrough_from_right_click)
+                        return 1
+                else:
+                    QtCore.QTimer.singleShot(0, isl, self.remove_if_unused)
+            elif isl.passthrough() and isl.isVisible() and not isl.expanded:
                 info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                dpr = isl.scr.devicePixelRatio()
-                sg = isl.scr.geometry()
-                lx = sg.x() + (info.pt.x - sg.x()) / dpr
-                ly = sg.y() + (info.pt.y - sg.y()) / dpr
-                if isl.isVisible() and not isl.expanded and isl._inside(QtCore.QPoint(round(lx), round(ly))):
+                if isl._inside_native(info.pt):
                     delta = ctypes.c_short((info.mouseData >> 16) & 0xFFFF).value
-                    QtCore.QTimer.singleShot(0, lambda d=delta: isl.wheel_compact.emit(1 if d > 0 else -1))
+                    QtCore.QTimer.singleShot(0, isl, lambda: isl.wheel_compact.emit(1 if delta > 0 else -1))
                     return 1
-            if code == 0 and wparam in (self.WM_RBUTTONDOWN, self.WM_RBUTTONUP):
-                info = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-                # 钩子坐标是物理像素，换算成 Qt 逻辑坐标
-                dpr = isl.scr.devicePixelRatio()
-                sg = isl.scr.geometry()
-                lx = sg.x() + (info.pt.x - sg.x()) / dpr
-                ly = sg.y() + (info.pt.y - sg.y()) / dpr
-                if isl.isVisible() and isl._inside(QtCore.QPoint(round(lx), round(ly))):
-                    if wparam == self.WM_RBUTTONUP:
-                        # 穿透模式下右键灵动岛直接退出穿透，不再打开设置菜单。
-                        QtCore.QTimer.singleShot(0, lambda: isl.set_passthrough(False))
-                    return 1          # 吞掉右键，不传给下面的窗口
             return u.CallNextHookEx(self.handle, code, wparam, lparam)
 
         self._proc = HOOKPROC(proc)
         self.handle = u.SetWindowsHookExW(14, self._proc, k.GetModuleHandleW(None), 0)
+        if not self.handle:
+            print(f"[island] 右键钩子安装失败：{ctypes.get_last_error()}")
 
     def remove(self):
         if self.handle:
             self._u.UnhookWindowsHookEx(self.handle)
         self.handle = None
         self._proc = None
+        self._right_captured = False
 
 
 class _Veil(QtWidgets.QWidget):
@@ -1188,7 +1199,18 @@ class Island(QtWidgets.QWidget):
 
     # ================================================================ 鼠标
     def _inside(self, gp: QtCore.QPoint) -> bool:
-        lp = QtCore.QPointF(gp - self._win_origin)
+        return self._inside_local(QtCore.QPointF(gp - self._win_origin))
+
+    def _inside_native(self, pos: wintypes.POINT) -> bool:
+        # 先让 Windows 按实际 HWND 转为客户区坐标，再换算为 Qt 逻辑像素。
+        # 多显示器的原生屏幕原点可能与 Qt 虚拟桌面的原点不同。
+        point = wintypes.POINT(pos.x, pos.y)
+        if not user32.ScreenToClient(int(self.winId()), ctypes.byref(point)):
+            return False
+        dpr = self.devicePixelRatioF()
+        return self._inside_local(QtCore.QPointF(point.x / dpr, point.y / dpr))
+
+    def _inside_local(self, lp: QtCore.QPointF) -> bool:
         if not self.path.boundingRect().adjusted(-6, -6, 6, 6).contains(lp):
             return False
         if self.path.contains(lp):
@@ -1345,6 +1367,11 @@ class Island(QtWidgets.QWidget):
     def passthrough(self) -> bool:
         return bool(cfg.get("island.passthrough", False))
 
+    def _exit_passthrough_from_right_click(self):
+        if self.passthrough():
+            self.set_passthrough(False)
+            print("[island] 通过右键解除穿透")
+
     def set_passthrough(self, on: bool):
         cfg.set("island.passthrough", bool(on))
         self._apply_passthrough()
@@ -1353,17 +1380,16 @@ class Island(QtWidgets.QWidget):
         self.passthrough_changed.emit(bool(on))
 
     def _apply_passthrough(self):
-        """穿透 = 鼠标完全穿过（WS_EX_TRANSPARENT），只靠钩子响应右键。"""
+        """通过 WS_EX_TRANSPARENT 穿透，用鼠标钩子处理右键和收起态滚轮。"""
         hwnd = int(self.winId())
         ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
         on = self.passthrough()
-        transparent = on
-        ex = (ex | WS_EX_TRANSPARENT) if transparent else (ex & ~WS_EX_TRANSPARENT)
+        ex = (ex | WS_EX_TRANSPARENT) if on else (ex & ~WS_EX_TRANSPARENT)
         user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex)
         if on:
             self._rhook.install()
         else:
-            self._rhook.remove()
+            self._rhook.remove_if_unused()
 
     def capture_visible(self) -> bool:
         return not bool(cfg.get("island.exclude_from_capture", False))

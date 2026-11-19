@@ -9,6 +9,7 @@ import sys
 import time
 import traceback
 import winreg
+from ctypes import wintypes
 from types import SimpleNamespace
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -17,6 +18,8 @@ from .core import bg
 from .core.config import DATA_DIR, ROOT, cfg, expand
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+ADMIN_START_PREF = DATA_DIR / "request-admin"
+UAC_RELAUNCH_ARG = "--wisland-after-uac"
 
 
 class Actions(QtCore.QObject):
@@ -96,6 +99,36 @@ def _restart_cmd() -> list[str]:
     return [exe, script]
 
 
+def admin_start_enabled() -> bool:
+    return ADMIN_START_PREF.is_file()
+
+
+def set_admin_start(on: bool):
+    if on:
+        ADMIN_START_PREF.touch()
+    else:
+        ADMIN_START_PREF.unlink(missing_ok=True)
+
+
+def _request_admin_start() -> bool:
+    """按用户设置请求 Windows UAC，获准后由管理员实例接管启动。"""
+    if not admin_start_enabled():
+        return False
+    shell = ctypes.windll.shell32
+    if shell.IsUserAnAdmin():
+        return False
+    exe, script = _restart_cmd()
+    launch = shell.ShellExecuteW
+    launch.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                       wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+    launch.restype = ctypes.c_void_p
+    args = subprocess.list2cmdline([script, UAC_RELAUNCH_ARG])
+    if (launch(None, "runas", exe, args, str(ROOT), 1) or 0) > 32:
+        return True
+    print("[wisland] 管理员启动未获批准，继续以普通权限运行")
+    return False
+
+
 def fix_autostart():
     """旧版本直接用 .venv/Scripts/pythonw.exe 自启：在 uv 创建的环境里会弹出终端窗口，
     关掉窗口灵动岛也会退出。检测到旧的命令就改成通过 wisland.vbs 启动。"""
@@ -125,6 +158,7 @@ def set_autostart(on: bool):
 
 
 def main():
+    uac_relaunch = UAC_RELAUNCH_ARG in sys.argv[1:]
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings)
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Wisland.DynamicIsland")
@@ -134,13 +168,15 @@ def main():
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Wisland")
     app.setApplicationDisplayName("Wisland")
-    bg.init()
-
     lock = QtCore.QLockFile(str(DATA_DIR / "wisland.lock"))
     lock.setStaleLockTime(0)
-    if not lock.tryLock(100):
+    if not lock.tryLock(5000 if uac_relaunch else 100):
         print("wisland 已在运行")
         return 0
+    if _request_admin_start():
+        lock.unlock()
+        return 0
+    bg.init()
     fix_autostart()
 
     from .services.audio import AudioService, BrightnessService
@@ -214,6 +250,7 @@ def main():
     compact = island.compact
     calendar = P["calendar"]
     calendar.deadlines_changed.connect(lambda n: island.nav.set_badge("calendar", n))
+    calendar.daily_reminders_changed.connect(island.nav.set_daily_reminders)
 
     # ---------------- 媒体 ----------------
     media_st = {"key": None, "lyr": None, "prev_view": None, "playing": False, "paused_pet": False}
@@ -452,7 +489,8 @@ def main():
             except RuntimeError:
                 pass
         win = SettingsWindow(ctx, {"apply_pages": apply_pages, "quit": app.quit,
-                                   "autostart_get": autostart_enabled, "autostart_set": set_autostart})
+                                   "autostart_get": autostart_enabled, "autostart_set": set_autostart,
+                                   "admin_start_get": admin_start_enabled, "admin_start_set": set_admin_start})
         ctx.settings = win
         win.present()
     ctx.open_settings = open_settings
