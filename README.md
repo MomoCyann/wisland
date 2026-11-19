@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>贴在 Windows 屏幕边缘的液态毛玻璃胶囊</strong><br>
-  音乐、歌词、消息、系统控制、Clash Verge、实时字幕与快捷工具集中在一处。
+  音乐、消息、系统控制、实时字幕与二游活动日历集中在一处。
 </p>
 
 <p align="center">
@@ -27,6 +27,7 @@
 | **音乐与网易云集成** | 仅基础 SMTC 会话控制，无本地日志歌名/红心/进度跳转 | 直读 `cloudmusic.elog` 获取曲目/进度/歌词；支持进度条点击拖动跳转、真红心状态识别、**漫游 ↔ 心动**一键后台切换、漫游切歌与本地缩略图防闪、封面 1.5 倍放大 + 仅悬停封面触发多色 Bloom |
 | **系统控制与 Clash** | 基础主音量、亮度、WLAN、蓝牙与简易 Clash 控制 | 新增 **分应用音量合成器**、**移动热点**、完整音频设备名称、静音滑块平滑收空；Clash 改为四行布局并通过全局快捷键联动 `verge.yaml` 状态 |
 | **天气 / 股票 / 消息** | 股票需本地后端；天气依赖 OpenWeather；消息需手动清角标 | 股票改直连腾讯财经、天气默认免 Key 的 Open-Meteo（开箱即用）；切到 QQ/微信前台自动清未读数；剪贴板改双列卡片；翻译页集成日语实时字幕、查词、单词本与 Anki 同步 |
+| **二游活动与脚本日常** | 无内置活动日历或日常日志摘要 | 接入 StarRailAssistant 公共 API，新增 14 天时间轴、可折叠的游戏分组与临期小钟。可选的今日日常读取三月七助手、绝区零一条龙及 OK-WW 的本地日志 |
 | **常驻性能开销** | 启动即全量加载重型依赖与高帧率轮询（早期私有内存约 670 MB） | 经两轮深度优化，实现依赖懒加载、COM/绘图缓存、按需降频与线程连接复用（同机实测私有内存降至 **160.5 MB**，线程 **46** 个，静止 CPU 降幅超 70%） |
 
 <details>
@@ -45,6 +46,9 @@
    - 切页高度变化时采用边界 1px 夹紧绘制毛玻璃底图并预留弹簧过冲空间，解决桌面顶部亮色壁纸回绕引起的蓝色光带闪烁。
    - 托盘左键点击展开使用独立 `"enter"` 锁，移入岛内再离开可按默认延迟自动收起；新增带托盘同款图标的 `Wisland.exe`、一键配置脚本 `setup.bat`、`run.bat` 及托盘「退出并重启」。
    - 两轮全面性能优化：按需懒加载 `sherpa-onnx`、`fugashi/unidic`、`numpy`（OpenBLAS）与单词本数据库连接；收起静止态降至 ~9 FPS 微弱流光，缓存字体、歌词宽度与贴纸目录，合并后台 WinRT 循环与 HTTP 连接池，控制页关闭时对 Clash / 热点 / 主音量降频轮询并增加通知库 `mtime` 预检。
+4. **活动日历与今日日常**：
+   - 在设置中选择游戏和区服并调整顺序。日历以独立配色的横条展示活动，顶栏小钟提示未来 72 小时内到期的活动。
+   - 今日日常按北京时间 04:00 换日，汇总本地日志中的实训、活跃度、刷本项目和运行耗时。可以自动定位已知日志、手动指定目录或关闭整个日常区。支持范围见[活动日历](#活动日历)。
 
 </details>
 
@@ -64,22 +68,42 @@
 
 ## 效果图
 
-<p align="center"><img src="screenshots/controls.png" width="820" alt="Wisland 控制中心"></p>
+截图来自当前版本，内容为演示数据。主页见上方。
+
+<p align="center"><img src="screenshots/game-calendar.png" width="900" alt="活动日历、临期角标和今日日常摘要"></p>
+
+<details>
+<summary>查看活动日历的游戏顺序与日志目录设置</summary>
+
+<p align="center"><img src="screenshots/calendar-settings.png" width="820" alt="活动日历设置，包括今日日常开关和日志目录"></p>
+
+</details>
+
+| 消息 | 股票 |
+| --- | --- |
+| <img src="screenshots/messages.png" width="470" alt="消息页与未读概览"> | <img src="screenshots/stocks.png" width="470" alt="股票自选行情"> |
+
+| 天气 | 控制中心 |
+| --- | --- |
+| <img src="screenshots/weather.png" width="470" alt="逐小时和五天天气预报"> | <img src="screenshots/controls.png" width="470" alt="控制中心、音量合成器与 Clash Verge"> |
+
+| 剪贴板 | 翻译 |
+| --- | --- |
+| <img src="screenshots/clipboard.png" width="470" alt="双列剪贴板卡片"> | <img src="screenshots/translation.png" width="470" alt="日语文本翻译"> |
+
+<p align="center"><img src="screenshots/live-captions.png" width="780" alt="日语实时字幕与中文译文"></p>
 
 <p align="center">
-  <img src="docs/compact_clock.png" height="58" alt="时钟收起态">&nbsp;
-  <img src="docs/compact_music.png" height="58" alt="音乐收起态">
+  <img src="screenshots/compact-clock.png" height="58" alt="时钟收起态">
+  <img src="screenshots/compact-pet.png" height="58" alt="贴纸收起态">
+  <img src="screenshots/compact-music.png" height="58" alt="音乐收起态">
 </p>
-
-<p align="center"><img src="docs/subtitles.png" width="640" alt="实时字幕"></p>
 
 <p align="center">
-  <img src="docs/theme_light.png" width="285" alt="浅色主题">
-  <img src="docs/theme_rouge.png" width="285" alt="胭脂主题">
-  <img src="docs/theme_sky.png" width="285" alt="晴空主题">
+  <img src="screenshots/theme-light.png" width="285" alt="浅色主题">
+  <img src="screenshots/theme-rouge.png" width="285" alt="胭脂主题">
+  <img src="screenshots/theme-sky.png" width="285" alt="晴空主题">
 </p>
-
-> 部分截图来自早期版本；当前贴纸、控制页布局和部分交互以实际运行效果为准。
 
 ## 系统要求
 
@@ -436,7 +460,6 @@ wisland/
 ├─ config.example.json      # 配置示例
 ├─ march7stickers/          # 默认贴纸目录
 ├─ screenshots/             # 当前版本截图
-├─ docs/                    # 其他 README 图片
 ├─ scripts/                 # 模型与辅助脚本
 ├─ tests/                   # 单元测试
 └─ wisland/
