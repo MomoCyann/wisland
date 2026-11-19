@@ -158,11 +158,11 @@ class StockService(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         ui(lambda: None)  # 确保 bg 回调 invoker 在主线程创建
-        self._busy = False
+        self._quote_request = None
         self._running = False
         self._fail_count = 0
         self.last: dict = {}
-        self._alerts = self._load_alerts()
+        self._alerts: dict | None = None
         self._timer = QtCore.QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._tick)
@@ -173,16 +173,22 @@ class StockService(QtCore.QObject):
 
     # ---------- lifecycle ----------
     def start(self):
+        if self._running:
+            return
+        if self._alerts is None:
+            self._alerts = self._load_alerts()
         self._running = True
         self._tick()
 
     def stop(self):
         self._running = False
         self._timer.stop()
+        if self._quote_request is not None and self._quote_request.cancel():
+            self._quote_request = None
 
     def refresh(self):
         """立即刷新。"""
-        if not self._busy:
+        if self._running and self._quote_request is None:
             self._timer.stop()
             self._tick()
 
@@ -210,10 +216,19 @@ class StockService(QtCore.QObject):
     def search(self, query: str, cb: Callable[[list], None]):
         """按名称 / 拼音 / 代码搜索 -> cb([{code, name}])（主线程回调）。"""
         def work():
+            if not self._running:
+                return []
             r = self._client.get(SEARCH_URL, params={"v": 2, "q": query, "t": "all"})
             r.raise_for_status()
             return parse_search(r.text)
-        run_bg(work, on_done=cb, on_error=lambda e: cb([]))
+        self._run_query(work, cb)
+
+    def _run_query(self, work: Callable[[], list], cb: Callable[[list], None]):
+        def deliver(result):
+            if self._running:
+                cb(result)
+        if self._running:
+            run_bg(work, on_done=deliver, on_error=lambda _error: deliver([]))
 
     # ---------- polling ----------
     def _schedule(self):
@@ -231,10 +246,9 @@ class StockService(QtCore.QObject):
         self._timer.start(int(sec * 1000))
 
     def _tick(self):
-        if self._busy or not self._running:
+        if self._quote_request is not None or not self._running:
             return
-        self._busy = True
-        run_bg(self._fetch, self.watchlist(), on_done=self._on_data, on_error=self._on_err)
+        self._quote_request = run_bg(self._fetch, self.watchlist(), on_done=self._on_data, on_error=self._on_err)
 
     def _fetch(self, codes: list[str]) -> dict:
         quotes: dict[str, dict] = {}
@@ -253,7 +267,9 @@ class StockService(QtCore.QObject):
                 "time": time.time(), "ok": True, "error": ""}
 
     def _on_data(self, data: dict):
-        self._busy = False
+        self._quote_request = None
+        if not self._running:
+            return
         self._fail_count = 0
         self.last = data
         try:
@@ -265,7 +281,9 @@ class StockService(QtCore.QObject):
         self._schedule()
 
     def _on_err(self, e: Exception):
-        self._busy = False
+        self._quote_request = None
+        if not self._running:
+            return
         self._fail_count += 1
         msg = "网络连接失败" if isinstance(e, httpx.TransportError) else f"行情获取失败：{str(e)[:80]}"
         self.last = {"markets": self.last.get("markets", {}), "status": {}, "time": time.time(),
@@ -277,6 +295,8 @@ class StockService(QtCore.QObject):
     def minute(self, code: str, cb: Callable[[list], None]):
         """异步取当日分时价格 -> cb(list[float])（主线程回调；失败给空列表）。"""
         def work():
+            if not self._running:
+                return []
             m = market_of(code)
             path = {"us": "UsMinute", "hk": "hkMinute"}.get(m, "minute")
             key = norm_code(code)
@@ -298,7 +318,7 @@ class StockService(QtCore.QObject):
                     except ValueError:
                         pass
             return pts
-        run_bg(work, on_done=cb, on_error=lambda e: cb([]))
+        self._run_query(work, cb)
 
     # ---------- alerts ----------
     def _load_alerts(self) -> dict:

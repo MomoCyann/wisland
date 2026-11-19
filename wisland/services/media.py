@@ -17,6 +17,7 @@ import traceback
 from PySide6 import QtCore, QtGui
 
 from wisland.core.config import DATA_DIR, cfg
+from wisland.core.bg import run_bg
 from wisland.services.netease import NeteaseLog
 
 try:
@@ -31,7 +32,9 @@ except Exception:  # noqa: BLE001
 POLL_S = 0.7
 VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_PLAY_PAUSE = 0xB0, 0xB1, 0xB3
 VK_CONTROL, VK_MENU, VK_L = 0x11, 0x12, 0x4C
+VK_LEFT, VK_RIGHT, VK_SPACE = 0x25, 0x27, 0x20
 _user32 = ctypes.WinDLL("user32")
+_netease_control_lock = threading.Lock()
 
 
 def media_key(vk: int):
@@ -47,9 +50,9 @@ def key_chord(*vks: int):
     """发送组合键；网易云默认用 Ctrl+Alt+L 喜欢 / 取消喜欢当前歌曲。"""
     try:
         for vk in vks:
-            _user32.keybd_event(vk, 0, 0, 0)
+            _user32.keybd_event(vk, 0, int(vk in (VK_LEFT, VK_RIGHT)), 0)
         for vk in reversed(vks):
-            _user32.keybd_event(vk, 0, 0x2, 0)      # KEYEVENTF_KEYUP
+            _user32.keybd_event(vk, 0, 0x2 | int(vk in (VK_LEFT, VK_RIGHT)), 0)
     except Exception:  # noqa: BLE001
         traceback.print_exc()
 
@@ -139,11 +142,12 @@ def _restore_netease_host(host: int, orig_ex: int | None, delay: float = 0.04):
     _set_exstyle(host, orig_ex)
 
 
-def _post_click(widget: int, x: int, y: int):
+def _post_click(widget: int, x: int, y: int) -> bool:
     lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
     _user32.PostMessageW(widget, 0x0200, 0, lp)  # WM_MOUSEMOVE
-    _user32.PostMessageW(widget, 0x0201, 1, lp)  # WM_LBUTTONDOWN
-    _user32.PostMessageW(widget, 0x0202, 0, lp)  # WM_LBUTTONUP
+    down = _user32.PostMessageW(widget, 0x0201, 1, lp)  # WM_LBUTTONDOWN
+    up = _user32.PostMessageW(widget, 0x0202, 0, lp)    # WM_LBUTTONUP
+    return bool(down and up)
 
 
 def seek_netease(seconds: float, duration: float) -> bool:
@@ -235,13 +239,13 @@ def _get_cached_acc_coords(w: int, h: int, dpr: float) -> dict[str, tuple[int, i
     return {}
 
 
-def _find_acc_targets(rwhh: int, targets: set[str], dpr: float = 1.0):
-    """从 CEF Chrome_RenderWidgetHostHWND 的 IAccessible 树快速（剪枝 BFS）查找左侧栏与顶栏目标控件。"""
+def _find_acc_targets(rwhh: int, targets: set[str], dpr: float = 1.0, *, footer=False):
+    """从 CEF 的 IAccessible 树定位侧栏、顶栏或底部播放控件。"""
     from ctypes import wintypes as W
     ole32 = ctypes.WinDLL("ole32", use_last_error=True)
     oleaut32 = ctypes.WinDLL("oleaut32", use_last_error=True)
     oleacc = ctypes.WinDLL("oleacc", use_last_error=True)
-    ole32.CoInitialize(None)
+    initialized = ole32.CoInitialize(None) in (0, 1)
 
     class GUID(ctypes.Structure):
         _fields_ = [("Data1", W.DWORD), ("Data2", W.WORD), ("Data3", W.WORD), ("Data4", W.BYTE * 8)]
@@ -292,6 +296,8 @@ def _find_acc_targets(rwhh: int, targets: set[str], dpr: float = 1.0):
 
     pacc = ctypes.c_void_p()
     if oleacc.AccessibleObjectFromWindow(rwhh, 0xFFFFFFFC, ctypes.byref(IID_IAccessible), ctypes.byref(pacc)) != 0 or not pacc.value:
+        if initialized:
+            ole32.CoUninitialize()
         return None, {}
 
     found: dict[str, tuple[int, int, int, int]] = {}
@@ -309,12 +315,17 @@ def _find_acc_targets(rwhh: int, targets: set[str], dpr: float = 1.0):
                 if depth > 0 and root_loc and loc and loc[2] > 0 and loc[3] > 0:
                     x_rel = loc[0] - rx
                     y_rel = loc[1] - ry
-                    # 仅保留左栏与左上角返回按钮所在区域，跳过主列表、歌词页与底栏的大量 DOM 节点
-                    if x_rel > max_x or (max_y > 0 and y_rel > max_y) or (x_rel + loc[2] <= 0) or (y_rel + loc[3] <= 0):
+                    if x_rel + loc[2] <= 0 or y_rel + loc[3] <= 0:
+                        continue
+                    if footer:
+                        if max_y > 0 and y_rel + loc[3] < max_y:
+                            continue
+                    elif x_rel > max_x or (max_y > 0 and y_rel > max_y):
                         continue
 
                 name = get_name(node)
-                if name in targets and name not in found and loc and loc[2] > 0 and loc[3] > 0:
+                in_region = not footer or (root_loc and loc and max_y <= loc[1] - ry + loc[3] / 2 < rh)
+                if in_region and name in targets and name not in found and loc and loc[2] > 0 and loc[3] > 0:
                     found[name] = loc
                     if len(found) == len(targets):
                         break
@@ -345,6 +356,36 @@ def _find_acc_targets(rwhh: int, targets: set[str], dpr: float = 1.0):
             if owned:
                 release(node)
         release(pacc.value)
+        if initialized:
+            ole32.CoUninitialize()
+
+
+def control_netease(targets: tuple[str, ...]) -> bool:
+    """直接点击网易云底栏里已定位的真实按钮，无需向前台游戏发送按键。"""
+    try:
+        with _netease_control_lock:
+            host, cef, widget, rwhh = _find_netease_windows()
+            if not widget or not rwhh:
+                return False
+            w, h, dpr, orig_ex = _prepare_netease_widget(host, cef, widget)
+            try:
+                root_loc, found = _find_acc_targets(rwhh, set(targets), dpr, footer=True)
+                if root_loc is None:
+                    return False
+                for name in targets:
+                    if name not in found:
+                        continue
+                    x, y, width, height = found[name]
+                    x += width // 2 - root_loc[0]
+                    y += height // 2 - root_loc[1]
+                    if 0 <= x < w and 0 <= y < h:
+                        return _post_click(widget, x, y)
+                return False
+            finally:
+                _restore_netease_host(host, orig_ex)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return False
 
 
 def switch_netease_mode(target_mode: str, cur_mode: str = "") -> bool:
@@ -780,48 +821,69 @@ class MediaService(QtCore.QObject):
             return None
 
     # ---------------- 控制 ----------------
-    def _submit(self, make_coro, fallback_vk: int | None = None):
-        """在媒体线程里对当前会话执行操作；没有会话 / 会话拒绝时改发键盘媒体键。"""
+    def _submit(self, make_coro, fallback=None, *, direct=None):
+        """依次尝试播放器窗口、系统媒体会话和按键。"""
+        def without_loop():
+            if (direct is None or not direct()) and fallback is not None:
+                fallback()
+
         loop = self._loop
         if loop is None:
-            if fallback_vk is not None:
-                media_key(fallback_vk)
+            if direct is not None or fallback is not None:
+                run_bg(without_loop)
             return
 
         async def wrapper():
             ok = False
             try:
+                if direct is not None:
+                    ok = await asyncio.get_running_loop().run_in_executor(None, direct)
                 s = self._session
-                if s is not None:
+                if not ok and s is not None:
                     ok = bool(await make_coro(s))
-                    await asyncio.sleep(0.08)
-                    await self._poll()
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
-            if not ok and fallback_vk is not None:
-                media_key(fallback_vk)
-                # 发出媒体键后立即跟进几次短轮询，不等完整 poll_ms 周期
-                for delay in (0.04, 0.08, 0.15):
+            if not ok and fallback is not None:
+                fallback()
+            if self._mgr is not None:
+                for delay in ((0.08,) if ok and direct is None else (0.04, 0.08, 0.15)):
                     try:
                         await asyncio.sleep(delay)
                         await self._poll()
                     except Exception:  # noqa: BLE001
                         traceback.print_exc()
 
+        coro = wrapper()
         try:
-            asyncio.run_coroutine_threadsafe(wrapper(), loop)
+            asyncio.run_coroutine_threadsafe(coro, loop)
         except RuntimeError:
-            if fallback_vk is not None:
-                media_key(fallback_vk)
+            coro.close()
+            if direct is not None or fallback is not None:
+                run_bg(without_loop)
+
+    def _transport(self, make_coro, media_vk: int, netease_vk: int, buttons: tuple[str, ...]):
+        source = str(self.state.get("source") or "").lower()
+        app_id = str(self.state.get("app_id") or "").lower()
+        if source == "netease" or "cloudmusic" in app_id:
+            async def cloudmusic_session(session):
+                if "cloudmusic" in (session.source_app_user_model_id or "").lower():
+                    return await make_coro(session)
+                return False
+
+            self._submit(cloudmusic_session, lambda: key_chord(VK_CONTROL, VK_MENU, netease_vk),
+                         direct=lambda: control_netease(buttons))
+        else:
+            self._submit(make_coro, lambda: media_key(media_vk))
 
     def play_pause(self):
-        self._submit(lambda s: s.try_toggle_play_pause_async(), VK_MEDIA_PLAY_PAUSE)
+        buttons = ("pause", "play") if self.state.get("playing") else ("play", "pause")
+        self._transport(lambda s: s.try_toggle_play_pause_async(), VK_MEDIA_PLAY_PAUSE, VK_SPACE, buttons)
 
     def next(self):
-        self._submit(lambda s: s.try_skip_next_async(), VK_MEDIA_NEXT)
+        self._transport(lambda s: s.try_skip_next_async(), VK_MEDIA_NEXT, VK_RIGHT, ("next",))
 
     def prev(self):
-        self._submit(lambda s: s.try_skip_previous_async(), VK_MEDIA_PREV)
+        self._transport(lambda s: s.try_skip_previous_async(), VK_MEDIA_PREV, VK_LEFT, ("pre",))
 
     def like(self):
         """喜欢 / 取消喜欢网易云当前歌曲（网易云默认全局快捷键 Ctrl+Alt+L）。"""

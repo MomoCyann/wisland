@@ -154,8 +154,8 @@ def main():
     from .services.translate import TranslateService
     from .services.weather import WeatherService, weather_glyph
     from .ui.island import Island
-    from .ui.pages.game_calendar import GameCalendarPage
     from .ui.pages.home import HomePage, MessagesPage
+    from .ui.pages.game_calendar import GameCalendarPage
     from .ui.pages.info import StocksPage, WeatherPage
     from .ui.pages.system import ControlsPage, styled_menu
     from .ui.pages.tools import ClipboardPage, TranslatePage
@@ -358,11 +358,22 @@ def main():
     ctx.stocks.updated.connect(P["stock"].set_data)
 
     def on_stock_alert(a):
+        if "stock" not in island.page_keys():
+            return
         pct = a.get("pct") or 0
         col = theme.up() if pct > 0 else theme.down()
-        island.activity({"glyph": G.STOCK, "color": col, "title": a.get("name", a.get("code", "")),
+        island.activity({"source": "stock", "glyph": G.STOCK, "color": col, "title": a.get("name", a.get("code", "")),
                          "sub": a.get("text", ""), "sub_color": col}, 5.0)
     ctx.stocks.alert.connect(on_stock_alert)
+
+    def sync_stock_page():
+        if "stock" in island.page_keys():
+            ctx.stocks.start()
+        else:
+            ctx.stocks.stop()
+            if compact.activity and compact.activity.get("source") == "stock":
+                compact.activity = None
+                island._kick()
 
     # ---------------- 天气 ----------------
     def on_weather(d):
@@ -424,12 +435,7 @@ def main():
         """页面显示 / 顺序改动后：重建导航、按需启停股票行情、刷新消息。"""
         island.apply_page_layout()
         calendar.set_monitoring("calendar" in island.page_keys())
-        keys = island.page_keys()
-        running = bool(getattr(ctx.stocks, "_running", False))
-        if "stock" in keys and not running:
-            ctx.stocks.start()
-        elif "stock" not in keys and running:
-            ctx.stocks.stop()          # 股票页隐藏了就别再请求行情，也不再弹涨跌提醒
+        sync_stock_page()
         if P["msg"].active:
             P["msg"].refresh()
         island._kick()
@@ -562,16 +568,17 @@ def main():
     if cyc > 0:
         QtCore.QTimer(app, interval=cyc * 1000, timeout=auto_cycle).start()
 
-    # ---------------- 全屏隐藏与前台消未读（合并为单一 1s 定时器） ----------------
+    # ---------------- 全屏隐藏、置顶恢复与前台消未读（共用 1s 定时器） ----------------
     def check_foreground_and_fullscreen():
         clear_foreground_messages()
-        if not cfg.get("island.hide_fullscreen", True):
+        if island.fullscreen_visible():
             island.set_fullscreen_hidden(False)
-            return
-        try:
-            island.set_fullscreen_hidden(ctx.windows.foreground_is_fullscreen(int(island.winId())))
-        except Exception:  # noqa: BLE001
-            pass
+        else:
+            try:
+                island.set_fullscreen_hidden(ctx.windows.foreground_is_fullscreen(int(island.winId())))
+            except Exception:  # noqa: BLE001
+                pass
+        island.ensure_topmost()
     fs_timer = QtCore.QTimer(app, interval=1000, timeout=check_foreground_and_fullscreen)
     # ---------------- 启动 ----------------
     island.show()
@@ -582,15 +589,14 @@ def main():
                   f"compact_a={island.compact_a.x:.2f} page={island._page_key} mode={island.mode}", flush=True)
         QtCore.QTimer(app, interval=2000, timeout=_dbg).start()
         _dbg()
-    for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.hotspot, ctx.windows, ctx.notify, ctx.stocks,
+    for s in (ctx.media, ctx.audio, ctx.brightness, ctx.radio, ctx.hotspot, ctx.windows, ctx.notify,
               ctx.weather, ctx.clash, ctx.translate, ctx.clipboard, ctx.mailcheck, ctx.learn):
         try:
             if hasattr(s, "start"):
                 s.start()
         except Exception:  # noqa: BLE001
             traceback.print_exc()
-    if "stock" not in island.page_keys():
-        ctx.stocks.stop()              # 股票页在设置里被隐藏时不必请求行情
+    sync_stock_page()
     calendar.set_monitoring("calendar" in island.page_keys())
     fs_timer.start()
     if os.environ.get("WISLAND_OPEN_SETTINGS"):     # 调试用：启动后直接弹出设置窗口

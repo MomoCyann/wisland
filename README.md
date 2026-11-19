@@ -119,7 +119,11 @@
 
 ## 安装
 
-### 方法一：下载源码
+### 方法一：Windows x64 便携版
+
+从 [GitHub Releases](https://github.com/MomoCyann/wisland/releases/latest) 下载 `Wisland-*-win-x64-portable.zip`，完整解压到可写目录，双击其中的 `Wisland.exe`。压缩包已带 Python 和运行依赖。首次启动会在解压目录生成配置与数据。实时字幕的识别模型在首次使用时单独下载。
+
+### 方法二：下载源码
 
 1. 安装 [Python 3.10+](https://www.python.org/downloads/windows/)，安装时建议勾选 **Add python.exe to PATH**。
 2. 下载本仓库并解压，或执行：
@@ -500,4 +504,4 @@ run.bat /d
 
 程序代码采用 [MIT License](LICENSE)。
 
-仓库不附带三月七或其他第三方角色贴纸图片；效果图中使用的三月七贴纸来源为 [三月七官方高清透明表情包-崩坏：星穹铁道社区-米游社](https://www.miyoushe.com/sr/article/60702394)。用户自行添加的图片不因程序代码采用 MIT License 而自动获得 MIT 授权，请确保素材拥有合法使用与分发许可。
+仓库不附带三月七或其他第三方角色贴纸图片。如需使用三月七贴纸，可参考 [三月七官方高清透明表情包-崩坏：星穹铁道社区-米游社](https://www.miyoushe.com/sr/article/60702394)。用户自行添加的图片不因程序代码采用 MIT License 而自动获得 MIT 授权，请确保素材拥有合法使用与分发许可。

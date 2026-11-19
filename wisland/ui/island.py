@@ -41,8 +41,12 @@ JOIN = 30.0                      # 靠近到这个距离时液桥伸出
 EDGE_MARGIN = 6
 
 GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TRANSPARENT = 0x00000020
+HWND_TOPMOST = -1
+GW_HWNDPREV = 3
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
 WM_HOTKEY = 0x0312
 HSHELL_FLASH = 0x8006
 MOD = {"alt": 0x1, "ctrl": 0x2, "control": 0x2, "shift": 0x4, "win": 0x8}
@@ -55,6 +59,16 @@ user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetClipCursor.argtypes = [ctypes.POINTER(wintypes.RECT)]
+user32.GetClipCursor.restype = wintypes.BOOL
+user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+user32.GetWindow.restype = wintypes.HWND
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+user32.IsWindowVisible.argtypes = [wintypes.HWND]
+user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, wintypes.UINT]
+user32.SetWindowPos.restype = wintypes.BOOL
 user32.RegisterWindowMessageW.restype = wintypes.UINT
 
 
@@ -262,6 +276,8 @@ class Island(QtWidgets.QWidget):
         self._hover_since = None
         self._out_since = None
         self._press: QtCore.QPointF | None = None
+        self._drag_up_since: float | None = None
+        self._drag_focus = False
         self._fs_hidden = False
         self._prev_fg = None
         self._registered_hotkeys: dict[int, str] = {}
@@ -533,16 +549,27 @@ class Island(QtWidgets.QWidget):
         self.sw.to(cw, 300, 0.55)
         self.sh.to(ch, 300, 0.55)
         self.mode = "drag"
+        self._drag_up_since = None
+        self._drag_focus = False
         self.fx.snap(c.x())
         self.fy.snap(c.y())
         self.drag_off = c - gpos
         if not (self.body.contains(QtCore.QPointF(gpos) - QtCore.QPointF(self._win_origin))):
             self.drag_off = QtCore.QPointF(0, 0)
         QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
+        self.grabMouse()
         self._kick()
 
-    def _end_drag(self):
+    def _release_drag_input(self):
+        if QtWidgets.QWidget.mouseGrabber() is self:
+            self.releaseMouse()
         QtWidgets.QApplication.restoreOverrideCursor()
+        if self._drag_focus:
+            self._drag_focus = False
+            self.release_focus()
+
+    def _end_drag(self):
+        self._release_drag_input()
         c = QtCore.QPointF(self.fx.x, self.fy.x)
         scr = QtGui.QGuiApplication.screenAt(c.toPoint()) or self.scr
         self.scr = scr
@@ -576,6 +603,25 @@ class Island(QtWidgets.QWidget):
         if self.neck_edge and self.neck_edge != edge:
             self._break_neck()
         self._kick()
+
+    def _update_drag(self, now: float):
+        if user32.GetAsyncKeyState(0x01) & 0x8000:
+            self._drag_up_since = None
+        elif self._drag_up_since is None:
+            self._drag_up_since = now
+        elif now - self._drag_up_since >= 0.12:
+            self._end_drag()
+            return
+
+        if not self._drag_focus and user32.GetForegroundWindow() != int(self.winId()):
+            clip = wintypes.RECT()
+            if user32.GetClipCursor(ctypes.byref(clip)) and min(clip.right - clip.left, clip.bottom - clip.top) <= 12:
+                # 游戏把光标锁在一个点时，只为这次用户主动拖动临时接管焦点。
+                self._drag_focus = True
+                self.request_focus()
+        cp = QtCore.QPointF(QtGui.QCursor.pos()) + self.drag_off
+        self.fx.to(cp.x())
+        self.fy.to(cp.y())
 
     def _break_neck(self):
         if not self.neck_edge:
@@ -612,12 +658,7 @@ class Island(QtWidgets.QWidget):
         self._last = now
 
         if self.mode == "drag":
-            if not (user32.GetAsyncKeyState(0x01) & 0x8000):
-                self._end_drag()
-            else:
-                cp = QtCore.QPointF(QtGui.QCursor.pos()) + self.drag_off
-                self.fx.to(cp.x())
-                self.fy.to(cp.y())
+            self._update_drag(now)
         if not self.expanded:
             cw, ch = self.compact.size_hint()
             if abs(self.sw.target - cw) > 0.5 or abs(self.sh.target - ch) > 0.5:
@@ -1226,6 +1267,11 @@ class Island(QtWidgets.QWidget):
 
     def mouseReleaseEvent(self, e):
         self.lp_timer.stop()
+        if self.mode == "drag" and e.button() == Qt.MouseButton.LeftButton:
+            self._press = None
+            self._end_drag()
+            e.accept()
+            return
         if self._press is not None and self._on_play_button(e.position()) and self._on_play_button(self._press):
             self._press = None
             self.play_pause_requested.emit()
@@ -1439,11 +1485,60 @@ class Island(QtWidgets.QWidget):
             pass
         return False, 0
 
+    def ensure_topmost(self):
+        """按原生窗口状态恢复置顶，无需激活灵动岛。"""
+        if self._fs_hidden or not self.isVisible() or self.isMinimized():
+            return
+        hwnd = int(self.winId())
+        if not user32.IsWindowVisible(hwnd):
+            return
+        if not user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST:
+            reason = "置顶标记丢失"
+        elif self._covered_by_topmost_foreground(hwnd):
+            reason = "前台置顶窗口覆盖"
+        else:
+            return
+        if user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE):
+            print(f"[island] 恢复置顶：{reason}")
+
+    def _covered_by_topmost_foreground(self, hwnd: int) -> bool:
+        fg = user32.GetForegroundWindow()
+        if not fg or fg == hwnd or self.body.isEmpty() or not user32.IsWindowVisible(fg):
+            return False
+        if not user32.GetWindowLongPtrW(fg, GWL_EXSTYLE) & WS_EX_TOPMOST:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+        # 自己的设置、菜单等可以盖在灵动岛上。
+        if not pid.value or pid.value == QtCore.QCoreApplication.applicationPid():
+            return False
+        rect, origin = wintypes.RECT(), wintypes.POINT()
+        if not user32.GetWindowRect(fg, ctypes.byref(rect)) or not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+            return False
+        # 原生窗口有大片透明区域，只检查岛身。以原生客户区原点换算，兼容不同缩放的显示器。
+        scale = self.devicePixelRatioF()
+        body = QtCore.QRectF(origin.x + self.body.x() * scale, origin.y + self.body.y() * scale,
+                             self.body.width() * scale, self.body.height() * scale)
+        if not body.intersects(QtCore.QRectF(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)):
+            return False
+        # 两个窗口都置顶时，仍要看前台窗口在 Z 顺序中是否排在灵动岛前面。
+        above = user32.GetWindow(hwnd, GW_HWNDPREV)
+        seen = {hwnd}
+        while above and above not in seen:
+            if above == fg:
+                return True
+            seen.add(above)
+            above = user32.GetWindow(above, GW_HWNDPREV)
+        return False
+
     def set_fullscreen_hidden(self, hidden: bool):
         if hidden == self._fs_hidden:
             return
         self._fs_hidden = hidden
         if hidden:
+            if self.mode == "drag":
+                self._end_drag()
             self.collapse()
             self.hide()
         else:
@@ -1451,6 +1546,8 @@ class Island(QtWidgets.QWidget):
             self._kick()
 
     def closeEvent(self, e):
+        if self.mode == "drag":
+            self._release_drag_input()
         hwnd = int(self.winId())
         for hid in self._registered_hotkeys:
             user32.UnregisterHotKey(hwnd, hid)
