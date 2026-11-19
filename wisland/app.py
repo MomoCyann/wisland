@@ -104,7 +104,9 @@ def fix_autostart():
             cur, _ = winreg.QueryValueEx(k, "wisland")
     except OSError:
         return
-    if cur != _autostart_cmd():
+    # 便携版可与旧目录共存。只迁移当前安装目录的旧启动命令。
+    root_prefix = os.path.normcase(str(ROOT)) + os.sep
+    if root_prefix in os.path.normcase(str(cur)) and cur != _autostart_cmd():
         try:
             set_autostart(True)
         except OSError:
