@@ -480,8 +480,13 @@ class GameCalendarPage(Page):
                 rows.append(_Row(GAMES[game], note, game=game, collapsed=collapsed))
                 continue
             items = [item for item in data.activities if item.end >= start and item.start < end]
-            items.sort(key=lambda item: (item.end < now, item.start > now,
-                                         item.start if item.start > now else item.end, item.name))
+            items.sort(key=lambda item: (
+                item.end < now or _activity_key(game, item) in self._acknowledged,
+                item.end < now,
+                item.start > now,
+                item.start if item.start > now else item.end,
+                item.name,
+            ))
             note = f"{data.version} 版本" if data.version else ""
             if not items:
                 note = " · ".join(filter(None, (note, "这段时间暂无活动")))
