@@ -12,7 +12,7 @@
   <img alt="License MIT" src="https://img.shields.io/badge/License-MIT-green">
 </p>
 
-<p align="center"><img src="screenshots/home.png" width="900" alt="Wisland 主页"></p>
+<p align="center"><img src="screenshots/home.png" width="900" alt="Wisland 主页与三月七贴纸"></p>
 
 > 本仓库基于 [AsamiAkito/wisland](https://github.com/AsamiAkito/wisland) 进行深度二次开发，在保留液态形变、毛玻璃与边缘吸附手感的同时，对交互体验、网易云集成、控制中心、安装启动与性能开销做了全面改造。
 
@@ -68,7 +68,7 @@
 
 ## 效果图
 
-截图来自当前版本，内容为演示数据。主页见上方。
+截图来自实际界面，使用演示数据。主页、贴纸收起态和主题预览使用三月七官方表情包。[素材来源 · 米游社](https://www.miyoushe.com/sr/article/60702394)
 
 <p align="center"><img src="screenshots/game-calendar.png" width="900" alt="活动日历、临期角标和今日日常摘要"></p>
 
@@ -95,7 +95,7 @@
 
 <p align="center">
   <img src="screenshots/compact-clock.png" height="58" alt="时钟收起态">
-  <img src="screenshots/compact-pet.png" height="58" alt="贴纸收起态">
+  <img src="screenshots/compact-pet.png" height="58" alt="三月七贴纸收起态">
   <img src="screenshots/compact-music.png" height="58" alt="音乐收起态">
 </p>
 
@@ -192,7 +192,7 @@ cd wisland
 march7stickers/
 ```
 
-仓库只保留目录说明，不附带三月七或其他第三方角色贴纸图片；演示与自用所涉三月七贴纸素材来源：[三月七官方高清透明表情包-崩坏：星穹铁道社区-米游社](https://www.miyoushe.com/sr/article/60702394)（请自行获取并放入目录中）。
+`march7stickers/` 默认只有目录说明。想用截图中的三月七贴纸，可以从米游社获取原图并放入该目录。[三月七官方高清透明表情包](https://www.miyoushe.com/sr/article/60702394)
 
 支持：
 
@@ -504,4 +504,4 @@ run.bat /d
 
 程序代码采用 [MIT License](LICENSE)。
 
-仓库不附带三月七或其他第三方角色贴纸图片。如需使用三月七贴纸，可参考 [三月七官方高清透明表情包-崩坏：星穹铁道社区-米游社](https://www.miyoushe.com/sr/article/60702394)。用户自行添加的图片不因程序代码采用 MIT License 而自动获得 MIT 授权，请确保素材拥有合法使用与分发许可。
+演示截图中的三月七贴纸和用户自行添加的图片适用各自的素材许可。
