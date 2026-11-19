@@ -154,6 +154,7 @@ def main():
     from .services.translate import TranslateService
     from .services.weather import WeatherService, weather_glyph
     from .ui.island import Island
+    from .ui.pages.game_calendar import GameCalendarPage
     from .ui.pages.home import HomePage, MessagesPage
     from .ui.pages.info import StocksPage, WeatherPage
     from .ui.pages.system import ControlsPage, styled_menu
@@ -188,7 +189,7 @@ def main():
     ctx.island = None
 
     pages = [HomePage(ctx), MessagesPage(ctx), StocksPage(ctx), WeatherPage(ctx), ControlsPage(ctx),
-             ClipboardPage(ctx), TranslatePage(ctx)]
+             ClipboardPage(ctx), TranslatePage(ctx), GameCalendarPage(ctx)]
     ctx.pages = {p.key: p for p in pages}
     P = ctx.pages
 
@@ -209,6 +210,8 @@ def main():
     island = Island(pages, peak_fn=peak)
     ctx.island = island
     compact = island.compact
+    calendar = P["calendar"]
+    calendar.deadlines_changed.connect(lambda n: island.nav.set_badge("calendar", n))
 
     # ---------------- 媒体 ----------------
     media_st = {"key": None, "lyr": None, "prev_view": None, "playing": False, "paused_pet": False}
@@ -420,6 +423,7 @@ def main():
     def apply_pages():
         """页面显示 / 顺序改动后：重建导航、按需启停股票行情、刷新消息。"""
         island.apply_page_layout()
+        calendar.set_monitoring("calendar" in island.page_keys())
         keys = island.page_keys()
         running = bool(getattr(ctx.stocks, "_running", False))
         if "stock" in keys and not running:
@@ -587,6 +591,7 @@ def main():
             traceback.print_exc()
     if "stock" not in island.page_keys():
         ctx.stocks.stop()              # 股票页在设置里被隐藏时不必请求行情
+    calendar.set_monitoring("calendar" in island.page_keys())
     fs_timer.start()
     if os.environ.get("WISLAND_OPEN_SETTINGS"):     # 调试用：启动后直接弹出设置窗口
         QtCore.QTimer.singleShot(1200, open_settings)

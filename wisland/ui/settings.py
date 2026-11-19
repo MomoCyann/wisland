@@ -11,8 +11,12 @@ from __future__ import annotations
 import os
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from shiboken6 import isValid
 
+from ..core import bg
 from ..core.config import CONFIG_PATH, DATA_DIR, ROOT, cfg, expand
+from ..services.game_calendar import GAMES, selected_games
+from ..services.game_daily import LOG_SOURCES, locate_logs, log_settings
 from .pagelayout import PAGE_INFO, page_layout, save_page_layout
 from .theme import THEME_NAMES, G, W, icon_font, theme, ui_font
 from .widgets import Card, Hoverable, IconButton, Label, Segmented, Sparkline, hbox, painter, vbox
@@ -275,6 +279,93 @@ class PageRow(QtWidgets.QWidget):
         self.setFixedHeight(46)
 
 
+class DailyLogEditor(QtWidgets.QWidget):
+    def __init__(self, on_change):
+        super().__init__()
+        self._on_change = on_change
+        self._revision = 0
+        self._fields = {}
+        self._badges = {}
+        self._buttons = {}
+        self._enabled = Toggle(bool(cfg.get("game_daily.enabled", True)))
+        self._enabled.toggled.connect(self._toggle)
+        root, folders = log_settings()
+        rows = [Row("显示今日日常", "开启后在活动日历上方读取本地脚本日志", self._enabled)]
+        for key, title in [("root", "脚本总目录"), *((k, source[0]) for k, source in LOG_SOURCES.items())]:
+            field = Field(root if key == "root" else folders.get(key, ""), "留空自动查找", width=214)
+            field.editingFinished.connect(lambda k=key: self._save(k))
+            pick = FlatButton("浏览")
+            pick.clicked.connect(lambda _checked=False, k=key, t=title: self._browse(k, t))
+            status = Label("", 11, level=3)
+            self._fields[key] = field
+            self._buttons[key] = pick
+            self._badges[key] = status
+            rows.append(Row(title, widget=hbox(status, field, pick, spacing=5)))
+        hint = WrapLabel("总目录留空时尝试固定磁盘根目录下的 mihoyoMOD。也可为每个脚本选择安装目录或日志目录。",
+                         11.5, level=3)
+        self.setLayout(vbox(Group("今日日常日志", rows), hint, spacing=6))
+        self._set_inputs_enabled(self._enabled.on)
+
+    def _set_inputs_enabled(self, on: bool):
+        for key, field in self._fields.items():
+            field.setEnabled(on)
+            self._buttons[key].setEnabled(on)
+
+    def _toggle(self, on: bool):
+        cfg.set("game_daily.enabled", on)
+        self._set_inputs_enabled(on)
+        self.check_locations()
+        self._on_change()
+
+    def _browse(self, key: str, title: str):
+        field = self._fields[key]
+        initial = field.text() or self._fields["root"].text()
+        if key != "root" and not field.text():
+            initial = self._badges[key].toolTip() or initial
+        path = QtWidgets.QFileDialog.getExistingDirectory(self, f"选择{title}目录", expand(initial))
+        if path:
+            field.setText(path)
+            self._save(key)
+
+    def _save(self, key: str):
+        value = self._fields[key].text().strip()
+        root, folders = log_settings()
+        if key == "root":
+            if value == root:
+                return
+            cfg.set("game_daily.root", value)
+        else:
+            if value == folders.get(key, ""):
+                return
+            if value:
+                folders[key] = value
+            else:
+                folders.pop(key, None)
+            cfg.set("game_daily.folders", folders)
+        self.check_locations()
+        self._on_change()
+
+    def check_locations(self):
+        self._revision += 1
+        for key in LOG_SOURCES:
+            self._badges[key].setText("检测中…" if self._enabled.on else "")
+            self._badges[key].setToolTip("")
+        if self._enabled.on:
+            revision = self._revision
+            bg.run_bg(locate_logs, *log_settings(),
+                      on_done=lambda locations: self._show_locations(revision, locations),
+                      on_error=lambda _error: self._show_locations(revision, {}))
+
+    def _show_locations(self, revision, locations):
+        if not isValid(self) or revision != self._revision:
+            return
+        for key in LOG_SOURCES:
+            status = self._badges[key]
+            location = locations.get(key)
+            status.setText("已找到" if location and location.found else "未找到")
+            status.setToolTip(str(location.folder) if location else "")
+
+
 
 class LauncherEditor(QtWidgets.QWidget):
     """主页快速应用：总开关、添加、重命名和删除。"""
@@ -357,6 +448,7 @@ class SettingsWindow(QtWidgets.QWidget):
     SECTIONS = [
         ("look", G.EYE, "外观"),
         ("pages", G.APPS, "页面"),
+        ("calendar", G.CALENDAR, "活动日历"),
         ("controls", G.SLIDERS, "控制中心"),
         ("notify", G.BELL, "通知与应用"),
         ("clash", G.GLOBE, "Clash"),
@@ -472,11 +564,14 @@ class SettingsWindow(QtWidgets.QWidget):
         self.head_title.setText(dict((k, t) for k, _, t in self.SECTIONS).get(key, "设置"))
         if key == "pages":
             self._rebuild_pages()
+        elif key == "calendar":
+            self._daily_logs.check_locations()
 
     # ================================================================ 各分类
     def _build_all(self):
         self._stacks["look"] = self._build_look()
         self._stacks["pages"] = self._build_pages()
+        self._stacks["calendar"] = self._build_calendar()
         self._stacks["controls"] = self._build_controls()
         self._stacks["notify"] = self._build_notify()
         self._stacks["clash"] = self._build_clash()
@@ -648,6 +743,70 @@ class SettingsWindow(QtWidgets.QWidget):
         fn = self.hooks.get("apply_pages")
         if fn:
             fn()
+
+    # ---------------- 活动日历 ----------------
+    def _build_calendar(self) -> QtWidgets.QWidget:
+        self._daily_logs = DailyLogEditor(self._reload_daily_logs)
+        self._game_card = Card(radius=16)
+        self._game_rows = QtWidgets.QVBoxLayout(self._game_card)
+        self._game_rows.setContentsMargins(0, 2, 0, 2)
+        self._game_rows.setSpacing(0)
+        hint = WrapLabel("开启的游戏按下列顺序显示在活动日历。活动数据来自 StarRailAssistant 公共 API。", 11.5, level=3)
+        w = QtWidgets.QWidget()
+        w.setLayout(vbox(self._daily_logs, hint, self._game_card, spacing=12))
+        self._rebuild_calendar()
+        return w
+
+    def _reload_daily_logs(self):
+        page = self.ctx.island.page("calendar")
+        if page:
+            page.reload_daily_logs()
+
+    def _rebuild_calendar(self):
+        while self._game_rows.count():
+            self._game_rows.takeAt(0).widget().deleteLater()
+        games = selected_games()
+        for game in games + [key for key in GAMES if key not in games]:
+            sw = Toggle(game in games)
+            sw.setAccessibleName(GAMES[game])
+            sw.toggled.connect(lambda on, k=game: self._toggle_game(k, on))
+            controls = hbox(sw, spacing=4)
+            if game in games:
+                i = games.index(game)
+                up = IconButton(G.UP, 26, 11, "上移")
+                down = IconButton(G.DOWN, 26, 11, "下移")
+                up.setEnabled(i > 0)
+                down.setEnabled(i < len(games) - 1)
+                up.clicked.connect(lambda k=game: self._move_game(k, -1))
+                down.clicked.connect(lambda k=game: self._move_game(k, 1))
+                controls.insertWidget(0, down)
+                controls.insertWidget(0, up)
+            self._game_rows.addWidget(Row(GAMES[game], widget=controls))
+
+    def _toggle_game(self, game: str, on: bool):
+        games = selected_games()
+        if on and game not in games:
+            games.append(game)
+        elif not on and game in games:
+            games.remove(game)
+        self._save_calendar(games)
+
+    def _move_game(self, game: str, delta: int):
+        games = selected_games()
+        if game not in games:
+            return
+        i = games.index(game)
+        j = i + delta
+        if 0 <= j < len(games):
+            games[i], games[j] = games[j], games[i]
+            self._save_calendar(games)
+
+    def _save_calendar(self, games: list[str]):
+        cfg.set("game_calendar.games", games)
+        page = self.ctx.island.page("calendar")
+        if page:
+            page.set_games(games)
+        self._rebuild_calendar()
 
     # ---------------- 控制中心 ----------------
     def _build_controls(self) -> QtWidgets.QWidget:

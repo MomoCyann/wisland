@@ -105,6 +105,14 @@
     "pct_alert": 3.0,
     "alerts": {}
   },
+  "game_calendar": {
+    "games": ["sr", "zzz", "ww"]
+  },
+  "game_daily": {
+    "enabled": true,
+    "root": "",
+    "folders": {}
+  },
   "weather": {
     "api_key": "",
     "city": "上海",

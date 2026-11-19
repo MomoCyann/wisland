@@ -37,6 +37,7 @@ class G:
     STOCK = "\uEAFC"
     SUN = "\uE706"
     CLOUD = "\uE753"
+    CALENDAR = "\uE787"
     SLIDERS = "\uE9E9"
     WINDOWS = "\uE7C4"
     CPU = "\uE950"

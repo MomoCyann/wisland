@@ -111,6 +111,16 @@ class NavBar(QtWidgets.QWidget):
             self.badges[key] = n
             self.update()
 
+    def event(self, event):
+        if event.type() == QtCore.QEvent.Type.ToolTip:
+            i = self._hit(event.pos())
+            count = self.badges.get("calendar", 0)
+            if i >= 0 and count and self.items[i][0] == "calendar":
+                QtWidgets.QToolTip.showText(event.globalPos(), f"{count} 项活动将在 72 小时内结束", self,
+                                           self._rects()[i].toAlignedRect())
+                return True
+        return super().event(event)
+
     def _kick(self):
         if not self._t.isActive():
             self._last = time.perf_counter()
@@ -245,6 +255,16 @@ class NavBar(QtWidgets.QWidget):
                 p.restore()
             n = self.badges.get(key, 0)
             if n:
-                p.setBrush(QtGui.QColor("#ff453a"))
+                badge = QtCore.QPointF(r.x() + ICON_W / 2 + 8, r.y() + 7)
                 p.setPen(Qt.PenStyle.NoPen)
-                p.drawEllipse(QtCore.QPointF(r.x() + ICON_W / 2 + 7, r.y() + 8), 3.2, 3.2)
+                if key == "calendar":
+                    p.setBrush(QtGui.QColor("#FFD686" if theme.dark else "#A45300"))
+                    p.drawEllipse(badge, 5.7, 5.7)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QtGui.QPen(QtGui.QColor("#3B2506" if theme.dark else "#FFFFFF"), 1))
+                    p.drawEllipse(badge, 3.4, 3.4)
+                    p.drawLine(badge - QtCore.QPointF(0, 2.1), badge)
+                    p.drawLine(badge, badge + QtCore.QPointF(1.6, 0.8))
+                else:
+                    p.setBrush(QtGui.QColor("#ff453a"))
+                    p.drawEllipse(badge + QtCore.QPointF(-1, 1), 3.2, 3.2)

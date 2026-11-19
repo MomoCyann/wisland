@@ -18,6 +18,7 @@ PAGE_INFO: dict[str, tuple[str, str, str]] = {
     "ctl": ("控制", "\uE9E9", "音量、亮度、WLAN / 蓝牙 / 热点、Clash Verge"),
     "clip": ("剪贴板", "\uE77F", "最近复制的 10 条文字 / 图片"),
     "trans": ("翻译", "\uF2B7", "翻译与实时字幕"),
+    "calendar": ("活动日历", "\uE787", "二游限时活动与结束时间"),
     "tasks": ("窗口", "\uE7C4", "Alt-Tab 式窗口切换"),
     "perf": ("性能", "\uE9D9", "CPU / 内存 / 网络 / 磁盘监控"),
 }

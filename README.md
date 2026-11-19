@@ -58,6 +58,7 @@
 - **Clash Verge Rev**：规则 / 全局 / 直连模式、系统代理、TUN、节点选择和实时速度。
 - **消息提醒**：QQ、微信、邮件；切到 QQ / 微信前台后自动清除对应未读数。
 - **实时字幕与学习**：系统声音日语识别、翻译、查词、单词本和 Anki 同步。
+- **二游活动日历与今日日常**：两周横向时间轴、临期提醒，以及可单独关闭的本地脚本日常摘要。
 - **低常驻开销**：实时字幕模型与日语词典按需加载，避免未使用时占用数百 MB 内存。
 - **独立可执行入口与原生进程名**：提供带托盘同款图标的 `Wisland.exe` 启动器与托盘「退出并重启」，后台进程直接显示为 `Wisland.exe`。
 
@@ -223,6 +224,31 @@ GIF 当前按静态帧显示。可在 **设置 → 外观 → 动效 → 贴纸�
 - 可选 OpenWeather。
 - 支持多城市、逐小时和多日预报。
 
+### 活动日历
+
+- 数据来自 [StarRailAssistant 公共 API](https://starrailassistant.top/reference/public-api/#获取活动数据)，无需 API Key。可选游戏和区服以该接口支持的列表为准，在 **设置 → 活动日历** 中开关和调序。
+- 日历按北京时间展示 14 天。每条活动有独立配色，悬停可查看起止时间，点击游戏名可折叠该组。未来 72 小时内有活动结束时，「今天」旁显示数量，悬停可看截止时间。顶部的日历页图标也会出现小钟，在其他页面同样能看到。
+- **今日日常**在日历上方显示实训或活跃度、刷本项目、完成时刻和脚本耗时。**设置 → 活动日历 → 显示今日日常**可隐藏该区并停止日志读取。
+
+#### 今日日常的日志来源
+
+活动数据和日常结果来自两套来源。原神等游戏可以显示活动日历，目前日常摘要只实现了以下三套脚本的日志解析。
+
+| 游戏 / 工具 | 已支持的日志格式 |
+| --- | --- |
+| 崩坏：星穹铁道 / 三月七助手 | `March7thAssistant_full/logs/runs` 下的单次运行 `.log` 和 `.json`，读取每日实训分数、已完成的副本和运行结果 |
+| 绝区零 / 一条龙 | `ZZZonedragon/.log/log.txt` 及其轮转日志，读取活跃度奖励、已结算的刷本和电量变化 |
+| 鸣潮 / OK-WW | `ok-ww/data/apps/ok-ww/working/logs/ok-script.log` 及其轮转日志，读取日常奖励流程和有日志证据的体力结算 |
+| 千机链（可选） | `千机链/.log/script_chainer_runner.log` 及其轮转日志，补充各脚本的启动、退出和耗时记录 |
+
+在 **设置 → 活动日历 → 今日日常日志** 中，可以选择一个脚本总目录，或分别为千机链、三月七助手、一条龙、OK-WW 指定安装目录或日志目录。单独指定的路径优先。总目录留空时，Wisland 尝试固定磁盘根目录下名为 `mihoyoMOD` 的目录，按上表的已知结构查找，不递归扫描磁盘。设置中显示日志文件是否找到，悬停可查看探测路径。
+
+日常按北京时间 04:00 换日。打开活动日历立即读取，页面可见时每 30 秒检查一次，也可手动刷新。自动跑和手动跑都根据当天写入的日志显示结果。日志缺失、实际得分未知或脚本异常退出会按已有证据显示。本地日志仅用于生成摘要。日常功能不运行脚本，也不上传日志。
+
+#### 扩展其他脚本
+
+原神日常、其他游戏日常，以及同一款游戏的其他脚本格式，**当前均不支持**。设对目录也不会自动推断陌生日志的含义。要扩展时，可以让 AI 或开发者参考 `wisland/services/game_daily.py`，用脱敏日志样例增加来源定位和解析规则，再把实际结果映射到 `Daily` / `Run` 并添加展示项。建议用完成、失败、取消、跨午夜和重复运行的样例验证，区分脚本退出与日常达标。
+
 ### 控制中心
 
 - 主音量与静音。
@@ -293,6 +319,9 @@ GIF 当前按静态帧显示。可在 **设置 → 外观 → 动效 → 贴纸�
 | `media.poll_ms` | 播放器刷新间隔（毫秒，`100–3000`，默认 `700`） |
 | `controls.show_mixer` | 是否显示分应用音量合成器 |
 | `clash.config_dir` | Clash Verge 配置目录 |
+| `game_calendar.games` | 活动日历中开启的游戏/区服及显示顺序 |
+| `game_daily.enabled` | 显示今日日常和启用日志读取 |
+| `game_daily.root` / `game_daily.folders` | 脚本总目录和各来源的覆盖目录。留空时使用已知路径规则 |
 | `translate.api_key` | 翻译 API Key |
 | `hotkeys.*` | 全局快捷键 |
 
@@ -335,6 +364,8 @@ GIF 当前按静态帧显示。可在 **设置 → 外观 → 动效 → 贴纸�
 | --- | --- |
 | 天气 | Open-Meteo 或用户配置的 OpenWeather |
 | 股票 | 腾讯财经公开接口 |
+| 活动日历 | StarRailAssistant 公共活动 API |
+| 今日日常 | 仅读取所配置的本地脚本日志 |
 | 歌词 | 网易云公开歌词接口 |
 | 翻译 | 用户配置的翻译 API |
 | 实时字幕模型 | Hugging Face / hf-mirror |
@@ -440,6 +471,7 @@ run.bat /d
 - 原项目：[AsamiAkito/wisland](https://github.com/AsamiAkito/wisland)
 - 实时字幕与单词本流水线移植自：[YishengTranslator-White](https://github.com/kayson-39/YishengTranslator-White)
 - Clash Verge Rev：[clash-verge-rev/clash-verge-rev](https://github.com/clash-verge-rev/clash-verge-rev)
+- 活动数据由 [StarRailAssistant 公共 API](https://starrailassistant.top/reference/public-api/) 提供。
 
 ## License 与素材说明
 

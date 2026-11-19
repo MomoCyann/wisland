@@ -90,6 +90,8 @@ DEFAULTS: dict = {
         "pct_alert": 3.0,            # 涨跌幅绝对值超过它时提醒（每只每天每个方向一次）
         "alerts": {},                # {"sh688256": {"above": 1500, "below": 1200}}
     },
+    "game_calendar": {"games": ["sr", "zzz", "ww"]},
+    "game_daily": {"enabled": True, "root": "", "folders": {}},
     "weather": {
         "api_key": "",         # 留空 = 使用 Open-Meteo（免费、无需 Key）；填 OpenWeather Key 则改用 OpenWeather
         "city": "上海",
