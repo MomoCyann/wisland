@@ -59,6 +59,7 @@ user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize
 user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetCapture.restype = wintypes.HWND
 user32.GetClipCursor.argtypes = [ctypes.POINTER(wintypes.RECT)]
 user32.GetClipCursor.restype = wintypes.BOOL
 user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
@@ -231,7 +232,7 @@ class Island(QtWidgets.QWidget):
 
     play_pause_requested = QtCore.Signal()      # 收起态音乐视图的播放 / 暂停键
 
-    def __init__(self, pages: list, peak_fn=None):
+    def __init__(self, pages: list, peak_fn=None, foreground_fullscreen=None):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
                          | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.NoDropShadowWindowHint)
         self.setWindowTitle("wisland")
@@ -240,6 +241,7 @@ class Island(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.resize(WIN_W, WIN_H)
         self.peak_fn = peak_fn or (lambda: 0.0)
+        self._foreground_fullscreen = foreground_fullscreen
 
         self.backdrop = Backdrop()
         self.compact = CompactView()
@@ -278,6 +280,8 @@ class Island(QtWidgets.QWidget):
         self._press: QtCore.QPointF | None = None
         self._drag_up_since: float | None = None
         self._drag_focus = False
+        self._drag_started = 0.0
+        self._drag_start_pos = QtCore.QPointF()
         self._fs_hidden = False
         self._prev_fg = None
         self._registered_hotkeys: dict[int, str] = {}
@@ -530,6 +534,7 @@ class Island(QtWidgets.QWidget):
     def begin_drag(self, gpos: QtCore.QPoint | None = None):
         if self.mode == "drag" or self.passthrough():
             return
+        fullscreen = self._foreground_fullscreen and self._foreground_fullscreen(int(self.winId()))
         gpos = QtCore.QPointF(gpos or QtGui.QCursor.pos())
         c = self.body.center() + QtCore.QPointF(self._win_origin)
         if self.expanded:
@@ -550,26 +555,41 @@ class Island(QtWidgets.QWidget):
         self.sh.to(ch, 300, 0.55)
         self.mode = "drag"
         self._drag_up_since = None
-        self._drag_focus = False
+        self._drag_started = time.perf_counter()
+        self._drag_start_pos = gpos
         self.fx.snap(c.x())
         self.fy.snap(c.y())
         self.drag_off = c - gpos
         if not (self.body.contains(QtCore.QPointF(gpos) - QtCore.QPointF(self._win_origin))):
             self.drag_off = QtCore.QPointF(0, 0)
         QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.ClosedHandCursor)
+        # 全屏窗口可能不断把光标拉回，即使没有把 ClipCursor 缩成很小的区域。
+        # 主动拖动时先拿到前台，再抓取鼠标，松手后把焦点还给原窗口。
+        if fullscreen:
+            self._drag_focus = True
+            self.request_focus()
         self.grabMouse()
         self._kick()
 
-    def _release_drag_input(self):
+    def _release_drag_input(self, reason: str):
+        hwnd = int(self.winId())
+        focused = user32.GetForegroundWindow() == hwnd
+        if self._drag_focus or reason == "button_poll":
+            elapsed = time.perf_counter() - self._drag_started
+            distance = (QtCore.QPointF(QtGui.QCursor.pos()) - self._drag_start_pos).manhattanLength()
+            print(f"[island drag] end={reason} seconds={elapsed:.2f} travel={distance:.0f} "
+                  f"requested_focus={self._drag_focus} foreground={focused} capture={user32.GetCapture() == hwnd}")
         if QtWidgets.QWidget.mouseGrabber() is self:
             self.releaseMouse()
         QtWidgets.QApplication.restoreOverrideCursor()
         if self._drag_focus:
             self._drag_focus = False
+            if not focused:
+                self._prev_fg = None  # 尊重拖动期间用户主动切换的窗口
             self.release_focus()
 
-    def _end_drag(self):
-        self._release_drag_input()
+    def _end_drag(self, reason: str):
+        self._release_drag_input(reason)
         c = QtCore.QPointF(self.fx.x, self.fy.x)
         scr = QtGui.QGuiApplication.screenAt(c.toPoint()) or self.scr
         self.scr = scr
@@ -605,20 +625,25 @@ class Island(QtWidgets.QWidget):
         self._kick()
 
     def _update_drag(self, now: float):
-        if user32.GetAsyncKeyState(0x01) & 0x8000:
+        hwnd = int(self.winId())
+        native_pressed = user32.GetAsyncKeyState(0x01) & 0x8000
+        captured_press = (user32.GetCapture() == hwnd
+                          and bool(QtGui.QGuiApplication.mouseButtons() & Qt.MouseButton.LeftButton))
+        if native_pressed or captured_press:
             self._drag_up_since = None
         elif self._drag_up_since is None:
             self._drag_up_since = now
         elif now - self._drag_up_since >= 0.12:
-            self._end_drag()
+            self._end_drag("button_poll")
             return
 
-        if not self._drag_focus and user32.GetForegroundWindow() != int(self.winId()):
+        if not self._drag_focus and user32.GetForegroundWindow() != hwnd:
             clip = wintypes.RECT()
             if user32.GetClipCursor(ctypes.byref(clip)) and min(clip.right - clip.left, clip.bottom - clip.top) <= 12:
                 # 游戏把光标锁在一个点时，只为这次用户主动拖动临时接管焦点。
                 self._drag_focus = True
                 self.request_focus()
+                self.grabMouse()
         cp = QtCore.QPointF(QtGui.QCursor.pos()) + self.drag_off
         self.fx.to(cp.x())
         self.fy.to(cp.y())
@@ -1171,6 +1196,9 @@ class Island(QtWidgets.QWidget):
         return self.body.adjusted(-4, -4, 4, 4).contains(lp)
 
     def _poll_hover(self):
+        if self.mode == "drag":
+            self._hover_since = self._out_since = None
+            return
         # 输入框的键盘焦点：切到别的窗口后立即释放，否则会一直保持展开
         if "focus" in self.locks and user32.GetForegroundWindow() != int(self.winId()):
             self._prev_fg = None
@@ -1269,7 +1297,7 @@ class Island(QtWidgets.QWidget):
         self.lp_timer.stop()
         if self.mode == "drag" and e.button() == Qt.MouseButton.LeftButton:
             self._press = None
-            self._end_drag()
+            self._end_drag("mouse_release")
             e.accept()
             return
         if self._press is not None and self._on_play_button(e.position()) and self._on_play_button(self._press):
@@ -1538,7 +1566,7 @@ class Island(QtWidgets.QWidget):
         self._fs_hidden = hidden
         if hidden:
             if self.mode == "drag":
-                self._end_drag()
+                self._end_drag("fullscreen_hide")
             self.collapse()
             self.hide()
         else:
@@ -1547,7 +1575,7 @@ class Island(QtWidgets.QWidget):
 
     def closeEvent(self, e):
         if self.mode == "drag":
-            self._release_drag_input()
+            self._release_drag_input("window_close")
         hwnd = int(self.winId())
         for hid in self._registered_hotkeys:
             user32.UnregisterHotKey(hwnd, hid)

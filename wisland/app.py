@@ -209,7 +209,7 @@ def main():
             peak_cache["value"] = 0.0
         return peak_cache["value"]
 
-    island = Island(pages, peak_fn=peak)
+    island = Island(pages, peak_fn=peak, foreground_fullscreen=ctx.windows.foreground_is_fullscreen)
     ctx.island = island
     compact = island.compact
     calendar = P["calendar"]

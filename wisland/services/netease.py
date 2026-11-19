@@ -17,9 +17,12 @@ import ctypes
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
 import traceback
+from contextlib import closing
+from pathlib import Path
 
 import psutil
 
@@ -28,6 +31,7 @@ from wisland.core.bg import http_client, run_bg
 ELOG = os.path.expandvars(r"%LOCALAPPDATA%\NetEase\CloudMusic\cloudmusic.elog")
 PRELOAD_BYTES = 2 * 1024 * 1024     # 回看最近约 2MB 日志即可覆盖数十首歌的当前曲目与红心状态
 MAX_CARRY = 256 * 1024
+LIKES_REFRESH_S = 3.0
 
 # 网易云重启后恢复播放时只写 appRestore{"id":…,"pause":true}，不带歌名，日志里也
 # 还没出现过这首歌的详情；此时按 song_id 查一次公开接口补上标题/歌手/专辑/时长/封面。
@@ -94,6 +98,9 @@ class NeteaseLog:
 
     def __init__(self, path: str = ELOG):
         self.path = path
+        self._library = Path(path).absolute().parent / "Library" / "webdb.dat"
+        self._library_likes: set[str] | None = None
+        self._next_library_check = 0.0
         self._lock = threading.Lock()
         self._offset = -1
         self._carry = b""
@@ -169,12 +176,35 @@ class NeteaseLog:
     def _now_pos(self, at: float) -> float:
         return self.pos + max(0.0, at - self.anchor) if self.playing else self.pos
 
+    def _known_liked(self, sid: str) -> bool:
+        return self._liked_by_id.get(sid, sid in (self._library_likes or ()))
+
+    def _refresh_library_likes(self, now: float):
+        if now < self._next_library_check:
+            return
+        self._next_library_check = now + LIKES_REFRESH_S
+        try:
+            with closing(sqlite3.connect(self._library.as_uri() + "?mode=ro", uri=True, timeout=0.025)) as db:
+                row = db.execute("SELECT jsonStr FROM persistentModel WHERE uniKey = ?",
+                                 ("async:hostResource",)).fetchone()
+            ids = json.loads(row[0])["data"]["likeTrackIds"] if row else None
+        except (sqlite3.Error, ValueError, KeyError, TypeError):
+            return
+        if not isinstance(ids, list):
+            return
+        likes = {str(sid) for sid in ids if isinstance(sid, (str, int))}
+        if self._library_likes is not None:
+            # 收藏缓存追上本地操作或同步了其他设备的修改后，用缓存中的新状态。
+            for sid in self._library_likes ^ likes:
+                self._liked_by_id.pop(sid, None)
+        self._library_likes = likes
+
     def _update_liked(self, line: str):
         """恢复红心状态。
 
         日志字段 ``is_heart`` 表示心动模式来源，不是歌曲是否已收藏；它在空心歌曲上
-        也会持续写 1，不能用于红心 UI。真正可靠的是切歌后紧跟的 trayLike 图标，
-        以及用户操作产生、带歌曲 id 的 add_track / del_track 事件。
+        也会持续写 1。切歌时只在托盘图标有变化等情况下才会写 trayLike，未写入时
+        用歌曲 ID 查本机收藏缓存；带 ID 的 add_track / del_track 事件即时覆盖缓存。
         """
         plain = line.replace('\\"', '"')
         change = _LIKE_CHANGE.search(plain)
@@ -205,8 +235,8 @@ class NeteaseLog:
             self._hint_liked = None
 
     def _init_liked_for_track(self, sid: str, tick: int):
-        """切歌时初始化红心状态；若伴随切歌预告已紧邻写出 trayLike，则直接采纳，否则重置为空心。"""
-        liked = False
+        """从收藏缓存初始化红心，并采纳本次切歌预告紧邻的 trayLike。"""
+        liked = self._known_liked(sid)
         if (
             self._hint_liked is not None
             and 0 <= tick - self._hint_liked_tick <= 2500
@@ -396,7 +426,7 @@ class NeteaseLog:
             sid = str(d.get("id") or "")
             if sid and (self.track is None or sid != self.track["id"]):
                 self.track = self._stub(sid)
-                self.liked = False
+                self.liked = self._known_liked(sid)
                 self._tray_song_id = sid
                 self._tray_from_tick, self._tray_until_tick = tick, tick + 2000
                 self._stub_since = time.monotonic()
@@ -413,7 +443,8 @@ class NeteaseLog:
                 return
             is_done = "完成" in line
             if self.track and sid == self.track["id"]:
-                if is_done and self.playing and not self.anchored:
+                if is_done and not self.anchored:
+                    self.playing = True                    # 有些入口只写 checkPlayPrivilege 和 load
                     self.pos, self.anchor = 0.0, at          # 缓冲结束、真正出声：校正进度
             else:
                 st = self._stub(sid)
@@ -516,6 +547,8 @@ class NeteaseLog:
             if not t:
                 return None
             now = time.monotonic()
+            self._refresh_library_likes(now)
+            self.liked = self._known_liked(t["id"])
             if not t.get("title"):
                 # 切歌后元数据尚未回填的短暂窗口内沿用上一帧快照，防止 UI 闪出「未在播放」与空封面
                 if self._last_good_snap and now - self._stub_since < 2.5:

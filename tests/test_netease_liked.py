@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
+import json
+import sqlite3
+import tempfile
 import unittest
+from contextlib import closing
+from pathlib import Path
+from unittest.mock import patch
 
 from wisland.services.netease import NeteaseLog
 
@@ -53,6 +59,43 @@ class NeteaseLikedStateTests(unittest.TestCase):
         self.log.set_liked("2", True)
         self.assertTrue(self.log.liked)
         self.assertTrue(self.log._liked_by_id["2"])
+
+    def test_consecutive_liked_tracks_use_library_without_a_tray_update(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            (base / "Library").mkdir()
+            with closing(sqlite3.connect(base / "Library" / "webdb.dat")) as db:
+                db.execute("CREATE TABLE persistentModel (uniKey TEXT PRIMARY KEY, jsonStr TEXT)")
+                db.execute("INSERT INTO persistentModel VALUES (?, ?)",
+                           ("async:hostResource", json.dumps({"data": {"likeTrackIds": ["2", "3"]}})))
+                db.commit()
+
+                log = NeteaseLog(path=str(base / "cloudmusic.elog"))
+                with patch.object(log, "_ensure_meta"), patch("wisland.services.netease.psutil.pid_exists", return_value=True):
+                    for sid in ("2", "3", "4"):
+                        log._line(_play_line(sid))
+                        snap = log.snapshot()
+                        self.assertEqual(snap["song_id"], sid)
+                        self.assertEqual(snap["liked"], sid in ("2", "3"))
+
+                    log._line(_play_line("3"))
+                    log.set_liked("3", False)
+                    self.assertFalse(log.snapshot()["liked"])
+                    db.execute("UPDATE persistentModel SET jsonStr = ?",
+                               (json.dumps({"data": {"likeTrackIds": ["2", "3", "4"]}}),))
+                    db.commit()
+                    log._next_library_check = 0
+                    log._line(_play_line("4"))
+                    self.assertTrue(log.snapshot()["liked"])
+                    log._line(_play_line("3"))
+                    self.assertFalse(log.snapshot()["liked"])
+
+    def test_load_completion_starts_track_prepared_by_privilege_check(self):
+        self.log._line(_play_line("2").replace("playOneTrackInPlayingList", "checkPlayPrivilege"))
+        self.assertFalse(self.log.playing)
+        self.log._line('[100:200:1116/120001:123457:INFO:x(1)] '
+                       '【playing】,"native播放资源load完成，开始播放",{"songId":"2"}')
+        self.assertTrue(self.log.playing)
 
 
 if __name__ == "__main__":
