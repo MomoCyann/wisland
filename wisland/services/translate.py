@@ -152,7 +152,7 @@ class TranslateService(QtCore.QObject):
         try:
             key, base, model = self._settings()
             if not key:
-                raise RuntimeError("未设置 DeepSeek API Key（config.json → translate.api_key）")
+                raise RuntimeError("未设置 DeepSeek API Key。请在「设置 → 翻译」中保存 Key")
             payload = {
                 "model": model,
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT},

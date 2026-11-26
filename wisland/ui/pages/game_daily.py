@@ -6,6 +6,7 @@ from functools import partial
 from PySide6 import QtCore, QtWidgets
 
 from ...core import bg
+from ...core.config import cfg
 from ...services.game_calendar import BEIJING
 from ...services.game_daily import DAILY_GAMES, Daily, daily_reminder, daily_reminders_due, daily_start, log_settings, read_today
 from ..theme import G, W
@@ -38,13 +39,16 @@ class DailyPanel(QtWidgets.QWidget):
         self._generation = 0
         self._day = None
         self._reminders: tuple[str, ...] = ()
+        self._visible_reminders: tuple[str, ...] = ()
         self._timer = QtCore.QTimer(self, interval=30_000, timeout=self.refresh)
         self._stamp = Label("等待读取", 11, level=3)
         reload_ = IconButton(G.REFRESH, 26, 11, "刷新日常日志")
         reload_.clicked.connect(self.refresh)
+        self._confirm = IconButton(G.CHECK, 26, 12)
+        self._confirm.clicked.connect(self._toggle_confirmation)
         self._alert = Label("", 11, W.DemiBold, level=2)
         self._alert.hide()
-        header = hbox(Label("今日日常", 15, W.DemiBold), self._alert, None, self._stamp, reload_,
+        header = hbox(Label("今日日常", 15, W.DemiBold), self._alert, None, self._stamp, reload_, self._confirm,
                       spacing=6, margins=(2, 0, 2, 0))
 
         self._rows = {}
@@ -63,6 +67,7 @@ class DailyPanel(QtWidgets.QWidget):
             body.addLayout(hbox(60, (stamina, 1), spacing=0))
             self._rows[game] = activity, stamina, timing
         self.setLayout(vbox(header, card, spacing=4))
+        self._update_confirmation()
 
     def start(self):
         if not self._timer.isActive():
@@ -136,10 +141,29 @@ class DailyPanel(QtWidgets.QWidget):
             self._set_reminders(("日常日志读取失败",))
 
     def _set_reminders(self, reminders: tuple[str, ...]):
-        if self._reminders == reminders:
-            return
         self._reminders = reminders
-        self._alert.setText(f"{len(reminders)} 项待确认" if reminders else "")
+        self._update_confirmation()
+
+    def _toggle_confirmation(self):
+        day = daily_start(datetime.now(BEIJING)).date().isoformat()
+        confirmed = cfg.get("game_daily.confirmed_day") == day
+        cfg.set("game_daily.confirmed_day", "" if confirmed else day)
+        if self._day is not None and self._day.isoformat() != day:
+            self.refresh()
+        else:
+            self._update_confirmation()
+
+    def _update_confirmation(self):
+        day = daily_start(datetime.now(BEIJING)).date().isoformat()
+        confirmed = cfg.get("game_daily.confirmed_day") == day
+        reminders = () if confirmed else self._reminders
+        title = "恢复今日日常提醒" if confirmed else "确认今日日常提醒"
+        self._confirm.set_active(confirmed)
+        self._confirm.setToolTip(title)
+        self._confirm.setAccessibleName(title)
+        self._alert.setText("今日已确认" if confirmed else f"{len(reminders)} 项待确认" if reminders else "")
         self._alert.setToolTip("\n".join(reminders))
-        self._alert.setVisible(bool(reminders))
-        self.reminders_changed.emit(reminders)
+        self._alert.setVisible(confirmed or bool(reminders))
+        if reminders != self._visible_reminders:
+            self._visible_reminders = reminders
+            self.reminders_changed.emit(reminders)

@@ -488,7 +488,7 @@ def main():
                 old.deleteLater()
             except RuntimeError:
                 pass
-        win = SettingsWindow(ctx, {"apply_pages": apply_pages, "quit": app.quit,
+        win = SettingsWindow(ctx, {"apply_pages": apply_pages, "quit": app.quit, "restart": restart_app,
                                    "autostart_get": autostart_enabled, "autostart_set": set_autostart,
                                    "admin_start_get": admin_start_enabled, "admin_start_set": set_admin_start})
         ctx.settings = win
@@ -588,7 +588,9 @@ def main():
         compact.set_view("music" if compact.playing() else "pet")
     island.nav.add_right_button(G.GEAR, "设置", lambda: open_settings())
 
-    app_icon = QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff")))
+    app_icon = QtGui.QIcon(str(ROOT / "wisland.ico"))
+    if not app_icon.availableSizes():
+        app_icon = QtGui.QIcon(glyph_pixmap(G.APPS, 32, QtGui.QColor("#4f8cff")))
     app.setWindowIcon(app_icon)
     tray = QtWidgets.QSystemTrayIcon(app_icon, app)
     tray.setToolTip("wisland 灵动岛")

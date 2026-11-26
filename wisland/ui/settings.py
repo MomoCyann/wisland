@@ -4,7 +4,7 @@
 以前的"设置"是右键菜单里的几项（主题 / 展开方式 / 可穿透…），塞不下也不直观。
 现在是一个独立窗口：左侧分类、右侧内容，改完立即生效并写回 config.json。
 
-分类：外观 / 页面 / 控制中心 / 通知与应用 / Clash / 快捷键 / 关于
+分类：外观 / 页面 / 活动日历 / 控制中心 / 通知与应用 / Clash / 翻译 / 快捷键 / 关于
 """
 from __future__ import annotations
 
@@ -443,7 +443,7 @@ class LauncherEditor(QtWidgets.QWidget):
 
 
 class SettingsWindow(QtWidgets.QWidget):
-    """设置窗口本体。hooks: {"apply_pages": fn, "quit": fn}"""
+    """设置窗口本体。hooks 由应用入口提供设置与退出操作。"""
 
     SECTIONS = [
         ("look", G.EYE, "外观"),
@@ -452,6 +452,7 @@ class SettingsWindow(QtWidgets.QWidget):
         ("controls", G.SLIDERS, "控制中心"),
         ("notify", G.BELL, "通知与应用"),
         ("clash", G.GLOBE, "Clash"),
+        ("translate", G.TRANSLATE, "翻译"),
         ("keys", G.SPEED, "快捷键"),
         ("about", G.GEAR, "关于"),
     ]
@@ -575,6 +576,7 @@ class SettingsWindow(QtWidgets.QWidget):
         self._stacks["controls"] = self._build_controls()
         self._stacks["notify"] = self._build_notify()
         self._stacks["clash"] = self._build_clash()
+        self._stacks["translate"] = self._build_translate()
         self._stacks["keys"] = self._build_keys()
         self._stacks["about"] = self._build_about()
         for w in self._stacks.values():
@@ -757,9 +759,11 @@ class SettingsWindow(QtWidgets.QWidget):
         self._game_rows = QtWidgets.QVBoxLayout(self._game_card)
         self._game_rows.setContentsMargins(0, 2, 0, 2)
         self._game_rows.setSpacing(0)
-        hint = WrapLabel("开启的游戏按下列顺序显示在活动日历。活动数据来自 StarRailAssistant 公共 API。", 11.5, level=3)
+        hint = WrapLabel("开启的游戏按下列顺序显示，也可以直接拖动日历里的组标题。活动数据来自 StarRailAssistant 公共 API。", 11.5, level=3)
         w = QtWidgets.QWidget()
         w.setLayout(vbox(self._daily_logs, hint, self._game_card, spacing=12))
+        if page := self.ctx.island.page("calendar"):
+            page.game_order_changed.connect(self._rebuild_calendar)
         self._rebuild_calendar()
         return w
 
@@ -945,6 +949,42 @@ class SettingsWindow(QtWidgets.QWidget):
         field.setText(str(port))
         cfg.set("clash.proxy_port", port)
 
+    # ---------------- 翻译 ----------------
+    def _build_translate(self) -> QtWidgets.QWidget:
+        key_field = Field(placeholder="粘贴 API Key", width=220)
+        key_field.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        key_field.setInputMethodHints(Qt.InputMethodHint.ImhSensitiveData | Qt.InputMethodHint.ImhNoPredictiveText)
+        key_field.setAccessibleName("DeepSeek API Key")
+        saved_key = str(cfg.get("translate.api_key") or "").strip()
+        key_field.setText(saved_key)
+        save_button = FlatButton("保存")
+        status = WrapLabel("本地 Key 已配置" if saved_key else "本地 Key 尚未配置")
+
+        def save_key():
+            key = key_field.text().strip()
+            if not key:
+                status.setText("请先输入 API Key")
+                key_field.setFocus()
+                return
+            previous = cfg.get("translate.api_key")
+            try:
+                cfg.set("translate.api_key", key)
+            except OSError:
+                cfg.set("translate.api_key", previous, save=False)
+                status.setText("保存失败，请检查 Wisland 文件夹是否可写")
+                return
+            key_field.setText(key)
+            status.setText("已保存，文本翻译和实时字幕会使用此 Key")
+
+        save_button.clicked.connect(save_key)
+        key_field.returnPressed.connect(save_key)
+        w = QtWidgets.QWidget()
+        w.setLayout(vbox(
+            Group("翻译服务", [Row("DeepSeek API Key", "文本翻译与实时字幕共用",
+                                    hbox(key_field, save_button, spacing=6))]),
+            status, spacing=8))
+        return w
+
     # ---------------- 快捷键 ----------------
     def _build_keys(self) -> QtWidgets.QWidget:
         rows = []
@@ -973,6 +1013,11 @@ class SettingsWindow(QtWidgets.QWidget):
         open_data.clicked.connect(lambda: os.startfile(str(DATA_DIR)))  # noqa: S606
         quit_btn = FlatButton("退出 wisland")
         quit_btn.clicked.connect(self._quit)
+        restart_btn = FlatButton("退出并重启")
+        restart = self.hooks.get("restart")
+        restart_btn.setEnabled(restart is not None)
+        if restart is not None:
+            restart_btn.clicked.connect(restart)
         w = QtWidgets.QWidget()
         w.setLayout(vbox(
             Group("", [
@@ -980,7 +1025,7 @@ class SettingsWindow(QtWidgets.QWidget):
                 Row("配置文件", str(CONFIG_PATH), open_cfg),
                 Row("数据目录", "日志、锁文件、股票提醒记录等", open_data),
             ]),
-            hbox(quit_btn, None),
+            hbox(quit_btn, restart_btn, None),
             spacing=14))
         return w
 

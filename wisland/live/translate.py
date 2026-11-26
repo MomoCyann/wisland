@@ -138,7 +138,7 @@ class Translator:
             return ""
         key = str(self.config.get("translate.api_key", "") or "").strip()
         if not key:
-            raise RuntimeError("未设置 DeepSeek API Key")
+            raise RuntimeError("未设置 DeepSeek API Key。请在「设置 → 翻译」中保存 Key")
         base = str(self.config.get("translate.base_url", "") or DEFAULT_BASE_URL).rstrip("/")
         payload = {
             "model": self.model,

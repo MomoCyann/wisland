@@ -67,16 +67,25 @@ class _Row:
 class _Timeline(QtWidgets.QWidget):
     game_clicked = QtCore.Signal(str)
     activity_clicked = QtCore.Signal(str, object)
+    game_reordered = QtCore.Signal(str, str)
+    dragging_changed = QtCore.Signal(bool)
 
-    def __init__(self, ruler=False):
+    def __init__(self, ruler=False, scroll_area=None):
         super().__init__()
         self.ruler = ruler
+        self._scroll_area = scroll_area
         self.rows: list[_Row] = []
+        self._headings: list[int] = []
         self.deadlines: list[tuple[str, Activity]] = []
         self.now = datetime.now(BEIJING)
         self.start = self.now
         self._hovered_game = ""
         self._pressed_row: _Row | None = None
+        self._press_pos = QtCore.QPoint()
+        self._drag_game = ""
+        self._drag_pos = QtCore.QPoint()
+        self._drop_row: int | None = None
+        self._drag_timer = QtCore.QTimer(self, interval=30, timeout=self._scroll_drag)
         self.setMouseTracking(not ruler)
         self.setFixedHeight(36 if ruler else 0)
         theme.changed.connect(self.update)
@@ -84,9 +93,12 @@ class _Timeline(QtWidgets.QWidget):
     def set_window(self, start: datetime, now: datetime, rows: list[_Row],
                    deadlines: list[tuple[str, Activity]] | None = None):
         self.start, self.now, self.rows = start, now, rows
+        self._headings = [i for i, row in enumerate(rows) if row.game and row.activity is None]
         self.deadlines = deadlines or []
         if not self.ruler:
             self.setFixedHeight(len(rows) * ROW_H)
+            if self._drag_game:
+                self._update_drop(self._drag_pos)
         self.update()
 
     def _x(self, days: float) -> float:
@@ -110,6 +122,10 @@ class _Timeline(QtWidgets.QWidget):
         last = min(len(self.rows), event.rect().bottom() // ROW_H + 1)
         for index in range(first, last):
             self._paint_row(p, self.rows[index], index * ROW_H)
+        if self._drop_row is not None:
+            y = min(self._drop_row * ROW_H, self.height() - 2)
+            p.setPen(QtGui.QPen(theme.accent, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(AXIS_PAD, max(1, y), self.width() - AXIS_PAD, max(1, y))
 
     def _paint_ruler(self, p, today):
         p.setFont(ui_font(11, W.Medium))
@@ -188,7 +204,7 @@ class _Timeline(QtWidgets.QWidget):
         hovered = bool(row.game and row.game == self._hovered_game)
         rect = QtCore.QRectF(0, y, self.width(), ROW_H)
         p.fillRect(rect, theme.card())
-        if hovered:
+        if hovered or (self._drag_game and row.game == self._drag_game):
             p.fillRect(rect, theme.hover())
         x = AXIS_PAD
         if row.game:
@@ -200,6 +216,12 @@ class _Timeline(QtWidgets.QWidget):
             points = [(3, -4), (7, 0), (3, 4)] if row.collapsed else [(1, -2), (5, 2), (9, -2)]
             p.drawPolyline(QtGui.QPolygonF([QtCore.QPointF(x + dx, mid + dy) for dx, dy in points]))
             x += 18
+            if len(self._headings) > 1:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(theme.text3())
+                for dx in (0, 4):
+                    for dy in (-4, 0, 4):
+                        p.drawEllipse(QtCore.QPointF(self.width() - AXIS_PAD - 9 + dx, mid + dy), 1.1, 1.1)
         p.setFont(ui_font(12, W.DemiBold))
         p.setPen(theme.text())
         title_width = p.fontMetrics().horizontalAdvance(row.title)
@@ -207,7 +229,7 @@ class _Timeline(QtWidgets.QWidget):
         note_x = x + title_width + 12
         p.setFont(ui_font(11))
         p.setPen(theme.text2())
-        note_width = max(0, self.width() - AXIS_PAD - note_x)
+        note_width = max(0, self.width() - AXIS_PAD - 18 - note_x)
         note = p.fontMetrics().elidedText(row.note, Qt.TextElideMode.ElideRight, note_width)
         p.drawText(QtCore.QRectF(note_x, y, note_width, ROW_H), Qt.AlignmentFlag.AlignVCenter, note)
 
@@ -226,8 +248,57 @@ class _Timeline(QtWidgets.QWidget):
                     return row
         return None
 
+    def _update_drop(self, pos: QtCore.QPoint):
+        self._drag_pos = pos
+        viewport = self._scroll_area.viewport()
+        self._drop_row = None
+        if viewport.rect().contains(viewport.mapFromGlobal(pos)):
+            y = self.mapFromGlobal(pos).y()
+            self._drop_row = next((i for i in self._headings if y < (i + 0.5) * ROW_H), len(self.rows))
+        self.update()
+
+    def _scroll_drag(self):
+        viewport = self._scroll_area.viewport()
+        pos = viewport.mapFromGlobal(self._drag_pos)
+        if not viewport.rect().contains(pos):
+            return
+        margin = min(24, viewport.height() // 3)
+        distance = min(0, pos.y() - margin) + max(0, pos.y() - (viewport.height() - margin))
+        bar = self._scroll_area.verticalScrollBar()
+        old = bar.value()
+        bar.setValue(old + distance // 2)
+        if bar.value() != old:
+            self._update_drop(self._drag_pos)
+
+    def cancel_drag(self):
+        self._pressed_row = None
+        if self._drag_game:
+            self._drag_game = ""
+            self._drop_row = None
+            self._drag_timer.stop()
+            self.unsetCursor()
+            self.update()
+            self.dragging_changed.emit(False)
+
     def mouseMoveEvent(self, event):
-        row = self._row_at(event.position().toPoint())
+        pos = event.position().toPoint()
+        left_down = bool(event.buttons() & Qt.MouseButton.LeftButton)
+        if self._drag_game and not left_down:
+            self.cancel_drag()
+        if (not self._drag_game and self._pressed_row and self._pressed_row.activity is None
+                and self._scroll_area and left_down
+                and abs(pos.y() - self._press_pos.y()) >= QtWidgets.QApplication.startDragDistance()
+                and len(self._headings) > 1):
+            self._drag_game = self._pressed_row.game
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            QtWidgets.QToolTip.hideText()
+            self.dragging_changed.emit(True)
+            self._drag_timer.start()
+        if self._drag_game:
+            self._update_drop(event.globalPosition().toPoint())
+            event.accept()
+            return
+        row = self._row_at(pos)
         game = row.game if row and row.activity is None else ""
         self.setCursor(Qt.CursorShape.PointingHandCursor if row else Qt.CursorShape.ArrowCursor)
         if game != self._hovered_game:
@@ -237,19 +308,30 @@ class _Timeline(QtWidgets.QWidget):
 
     def leaveEvent(self, event):
         self._hovered_game = ""
-        self.unsetCursor()
+        if not self._drag_game:
+            self.unsetCursor()
         self.update()
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._pressed_row = self._row_at(event.position().toPoint())
+            self._press_pos = event.position().toPoint()
+            self._pressed_row = self._row_at(self._press_pos)
             if self._pressed_row:
                 event.accept()
                 return
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._drag_game:
+            self._update_drop(event.globalPosition().toPoint())
+            game, drop = self._drag_game, self._drop_row
+            before = self.rows[drop].game if drop is not None and drop < len(self.rows) else ""
+            self.cancel_drag()
+            if drop is not None:
+                self.game_reordered.emit(game, before)
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._pressed_row:
             row, self._pressed_row = self._pressed_row, None
             if row == self._row_at(event.position().toPoint()):
@@ -262,6 +344,10 @@ class _Timeline(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
     def event(self, event):
+        if event.type() in (QtCore.QEvent.Type.Hide, QtCore.QEvent.Type.UngrabMouse):
+            self.cancel_drag()
+        if self._drag_game and event.type() == QtCore.QEvent.Type.ToolTip:
+            return True
         if self.ruler and self.deadlines and event.type() == QtCore.QEvent.Type.ToolTip:
             today = (self.now.date() - self.start.date()).days
             if 0 <= today < DAYS:
@@ -288,6 +374,9 @@ class _Timeline(QtWidgets.QWidget):
                 if desc:
                     tip += f"<br><p style='white-space:normal'>{desc}</p>"
                 QtWidgets.QToolTip.showText(event.globalPos(), tip, self, QtCore.QRect(0, i * ROW_H, self.width(), ROW_H))
+            elif i in self._headings and len(self._headings) > 1:
+                QtWidgets.QToolTip.showText(event.globalPos(), "点击展开或折叠，拖动整组排序", self,
+                                           QtCore.QRect(0, i * ROW_H, self.width(), ROW_H))
             else:
                 QtWidgets.QToolTip.hideText()
             return True
@@ -299,6 +388,7 @@ class GameCalendarPage(Page):
     REFRESH_SECONDS = 1800
     deadlines_changed = QtCore.Signal(int)
     daily_reminders_changed = QtCore.Signal(object)
+    game_order_changed = QtCore.Signal()
 
     def __init__(self, ctx):
         super().__init__(ctx)
@@ -330,12 +420,14 @@ class GameCalendarPage(Page):
                       spacing=4, margins=(2, 0, 2, 0))
 
         self._ruler = _Timeline(ruler=True)
-        self._timeline = _Timeline()
-        self._timeline.game_clicked.connect(self._toggle_game)
-        self._timeline.activity_clicked.connect(self._toggle_activity)
         self._scroll = ScrollArea()
         self._scroll.verticalScrollBar().setFixedWidth(SCROLL_W)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._timeline = _Timeline(scroll_area=self._scroll)
+        self._timeline.game_clicked.connect(self._toggle_game)
+        self._timeline.activity_clicked.connect(self._toggle_activity)
+        self._timeline.game_reordered.connect(self._move_game)
+        self._timeline.dragging_changed.connect(self._lock_during_drag)
         self._scroll.inner.setLayout(vbox(self._timeline, None, spacing=0))
         card = Card(radius=14)
         card.setLayout(vbox(hbox((self._ruler, 1), SCROLL_W, spacing=0), (self._scroll, 1), spacing=0))
@@ -353,6 +445,7 @@ class GameCalendarPage(Page):
         self._sync_daily_monitoring()
 
     def on_hide(self):
+        self._timeline.cancel_drag()
         super().on_hide()
         self._sync_daily_monitoring()
 
@@ -375,6 +468,7 @@ class GameCalendarPage(Page):
             self._daily.stop()
 
     def set_games(self, games: list[str]):
+        self._timeline.cancel_drag()
         self._games = games
         if self.active or self._monitoring:
             self._refresh()
@@ -443,6 +537,24 @@ class GameCalendarPage(Page):
         else:
             self._collapsed.add(game)
         self._render()
+
+    def _lock_during_drag(self, dragging: bool):
+        if self.island is not None:
+            if dragging:
+                self.island.locks.add("calendar-reorder")
+            else:
+                self.island.locks.discard("calendar-reorder")
+
+    def _move_game(self, game: str, before: str):
+        if game not in self._games or game == before or (before and before not in self._games):
+            return
+        games = [key for key in self._games if key != game]
+        games.insert(games.index(before) if before else len(games), game)
+        if games != self._games:
+            cfg.set("game_calendar.games", games)
+            self._games = games
+            self._render()
+            self.game_order_changed.emit()
 
     def _toggle_activity(self, game: str, item: Activity):
         self._acknowledged.symmetric_difference_update({_activity_key(game, item)})
